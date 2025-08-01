@@ -1,5 +1,5 @@
 {
-  description = "Home Manager configuration of Kyle Mello";
+  description = "Kyle's Home Manager configuration";
 
   inputs = {
     # Specify the source of Home Manager and Nixpkgs.
@@ -14,10 +14,11 @@
     { nixpkgs, home-manager, ... }:
     let
       system = "x86_64-linux";
+      username = builtins.getEnv "USER"
       pkgs = nixpkgs.legacyPackages.${system};
     in
     {
-      homeConfigurations.kyle = home-manager.lib.homeManagerConfiguration {
+      homeConfigurations."${username}" = home-manager.lib.homeManagerConfiguration {
         inherit pkgs;
 
         # Specify your home configuration modules here, for example,

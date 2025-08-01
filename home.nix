@@ -36,6 +36,7 @@
     lazydocker
     lazygit
     nodejs
+    pnpm
     python3
     ripgrep
     tealdeer
