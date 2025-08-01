@@ -48,11 +48,12 @@
     enable = true;
     role = "server";
   };
+
+  networking.firewall.allowedTCPPorts = [ 22 6443 ];
   networking.firewall.allowedTCPPortRanges = [ 
     # This opens the default kubernetes NodePort Range
     { from = 30000; to = 32767; }
   ];
-  networking.firewall.allowedTCPPorts = [ 22 6443 ];
   # Enable Hyper-V guest services for better integration.
   virtualisation.hypervGuest.enable = true;
   virtualisation.containers.enable = true;
