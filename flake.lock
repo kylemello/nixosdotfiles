@@ -1,5 +1,23 @@
 {
   "nodes": {
+    "catppuccin": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1754950929,
+        "narHash": "sha256-75hsUMshZ5ZlO/X2JWfZqKHPM66uhUNsDG/Zozwh/xs=",
+        "owner": "catppuccin",
+        "repo": "nix",
+        "rev": "45512611f1537c75e439d508409efc6901286645",
+        "type": "github"
+      },
+      "original": {
+        "owner": "catppuccin",
+        "repo": "nix",
+        "type": "github"
+      }
+    },
     "home-manager": {
       "inputs": {
         "nixpkgs": [
@@ -7,11 +25,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1753675338,
-        "narHash": "sha256-KDS9sr7dddH97lUXa7oxfRqphBlCA6JxZO4m/Z4W06I=",
+        "lastModified": 1754950654,
+        "narHash": "sha256-30f9MF+zIKLodQRuSLyY4OSDZSOy5O+/FslgPt/prbc=",
         "owner": "nix-community",
         "repo": "home-manager",
-        "rev": "e4b032ba5113664f0b8b23d956e59ce8e0bc349d",
+        "rev": "d19f3213e51469321835a9188adfa20391ff9371",
         "type": "github"
       },
       "original": {
@@ -22,11 +40,27 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1753429684,
-        "narHash": "sha256-9h7+4/53cSfQ/uA3pSvCaBepmZaz/dLlLVJnbQ+SJjk=",
+        "lastModified": 1754498491,
+        "narHash": "sha256-erbiH2agUTD0Z30xcVSFcDHzkRvkRXOQ3lb887bcVrs=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c2ae88e026f9525daf89587f3cbee584b92b6134",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1754725699,
+        "narHash": "sha256-iAcj9T/Y+3DBy2J0N+yF9XQQQ8IEb5swLFzs23CdP88=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "7fd36ee82c0275fb545775cc5e4d30542899511d",
+        "rev": "85dbfc7aaf52ecb755f87e577ddbe6dbbdbc1054",
         "type": "github"
       },
       "original": {
@@ -38,8 +72,9 @@
     },
     "root": {
       "inputs": {
+        "catppuccin": "catppuccin",
         "home-manager": "home-manager",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs_2"
       }
     }
   },

@@ -1,22 +1,13 @@
-{ config, pkgs, ... }:
+{ lib, config, pkgs, ... }:
 
 {
-  # Create the directories and files using home.file.
-  home.file = {
-    "personal" = {
-      type = "directory";
-    };
-
-    "work" = {
-      type = "directory";
-    };
-
-    "work/.gitconfig" = {
-      text = ''
-        [user]
-          email = kmello@broadriverrehab.com
-      '';
-    };
-  };
+  home.activation.createDirsAndFiles = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    $DRY_RUN_CMD mkdir -p "$HOME/personal"
+    $DRY_RUN_CMD mkdir -p "$HOME/work"
+    $DRY_RUN_CMD cat > "$HOME/work/.gitconfig" <<EOF
+    [user]
+      email = kmello@broadriverrehab.com
+    EOF
+  '';
 }
 

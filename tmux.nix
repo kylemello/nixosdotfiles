@@ -29,6 +29,17 @@ let
     mantle = "#181825";
     crust = "#11111b";
   };
+
+  suspend = pkgs.tmuxPlugins.mkTmuxPlugin {
+    pluginName = "suspend";
+    version = "1a2f806666e0bfed37535372279fa00d27d50d14";
+    src = pkgs.fetchFromGitHub {
+      owner = "MunifTanjim";
+      repo = "tmux-suspend";
+      rev = "1a2f806666e0bfed37535372279fa00d27d50d14";
+      sha256 = "sha256-+1fKkwDmr5iqro0XeL8gkjOGGB/YHBD25NG+w3iW+0g=";
+    };
+  };
 in
 {
   programs.tmux = {
@@ -42,8 +53,8 @@ in
     prefix = "C-space";
     terminal = "tmux-256color";
     plugins = with pkgs.tmuxPlugins; [
+      suspend
       sensible
-
       {
         plugin = resurrect;
         extraConfig = ''
@@ -65,11 +76,23 @@ in
     # All other settings go into extraConfig
     extraConfig = ''
       # --- General Settings ---
-      set -ga terminal-overrides ",tmux-256color*:Tc" # Enable True Color support
+      set -ga terminal-overrides ",xterm-256color*:Tc" # Enable True Color support
       setw -g pane-base-index 1
 
       # --- Keybindings ---
       bind-key C-space send-prefix
+
+      # Scroll with mouse wheel
+      bind -n WheelUpPane if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'select-pane -t=; copy-mode -e; send-keys -M'"
+      bind -n WheelDownPane select-pane -t= \; send-keys -M
+
+      # Vi-mode copy bindings
+      bind -T copy-mode-vi v send-keys -X begin-selection
+      bind -T copy-mode-vi C-v send-keys -X rectangle-toggle
+      bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+
+      # Use system clipboard
+      set -s set-clipboard on
 
       # Split window keeping the current path
       bind '"' split-window -v -c "#{pane_current_path}"
@@ -88,14 +111,6 @@ in
       bind -r J resize-pane -D 5
       bind -r K resize-pane -U 5
       bind -r L resize-pane -R 5
-
-      # Vi-mode copy bindings
-      bind -T copy-mode-vi v send-keys -X begin-selection
-      bind -T copy-mode-vi C-v send-keys -X rectangle-toggle
-      bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
-
-      # Use system clipboard
-      set -s set-clipboard on
 
       # --- Appearance (Catppuccin Mocha) ---
 
@@ -120,14 +135,12 @@ in
 
       # Status line right side
       set -g status-right-length 100
-      set -g status-right "#{tmux_mode_indicator}#[fg=${catppuccin.yellow},bg=${catppuccin.surface0}]#{?window_zoomed_flag, 󰹑 , }#[fg=${catppuccin.text},bg=${catppuccin.surface0}] %Y-%m-%d 󰥔 %I:%M:%S%p #[fg=${catppuccin.blue},bg=${catppuccin.surface0}]#[fg=${catppuccin.base},bg=${catppuccin.blue},bold] #h "
+      set -g status-right "#{tmux_mode_indicator}#[fg=${catppuccin.yellow},bg=${catppuccin.surface0}]#{?window_zoomed_flag, 󰹑 , }#[fg=${catppuccin.text},bg=${catppuccin.surface0}] %Y-%m-%d 󰥔 %I:%M:%S%p #[fg=${catppuccin.blue},bg=${catppuccin.surface0}]#[fg=${catppuccin.base},bg=${catppuccin.blue},bold] #h #($HOME/.local/bin/distro_icon.sh || echo '') "
 
-      # Window status alignment and format
+      # Window status
       set -g status-justify "left"
       setw -g window-status-current-format "#[fg=${catppuccin.base},bg=${catppuccin.pink}]#[fg=${catppuccin.base},bg=${catppuccin.pink},bold] #I  #W #[fg=${catppuccin.pink},bg=${catppuccin.base},nobold]"
-      setw -g window-status-format "#[fg=${catppuccin.text},bg=${catppuccin.base}] #I  #W #[fg=${catppuccin.base},bg=${catppuccin.base}]"
-
-      # Highlight window activity
+      setw -g window-status-format "#[fg=${catppuccin.text},bg=${catppuccin.base}] #I  #W "
       setw -g window-status-activity-style "fg=${catppuccin.yellow},bg=${catppuccin.base}"
 
       # Clock mode

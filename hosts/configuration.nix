@@ -1,22 +1,23 @@
 { config, pkgs, ... }:
 
 {
-  imports =
-    [ # Include the results of the hardware scan.
-      ./hardware-configuration.nix
-    ];
+  imports = [
+    <nixos-wsl/modules>
+  ];
 
+  wsl.enable = true;
+  wsl.defaultUser = "kyle";
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   # Use the systemd-boot EFI boot loader.
-  boot.loader.systemd-boot.enable = true;
-  boot.loader.efi.canTouchEfiVariables = true;
+  # boot.loader.systemd-boot.enable = true;
+  # boot.loader.efi.canTouchEfiVariables = true;
 
   # Set your time zone.
   time.timeZone = "America/New_York";
 
   # Set your hostname.
-  networking.hostName = "nixosvm";
+  networking.hostName = "artemis";
 
   # Enable networking with DHCP.
   networking.networkmanager.enable = true;
@@ -66,5 +67,5 @@
 
   # This value determines the NixOS release from which the default
   # settings for stateful data were taken.
-  system.stateVersion = "25.05";
+  system.stateVersion = "24.11";
 }

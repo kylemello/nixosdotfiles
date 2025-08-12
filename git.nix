@@ -22,13 +22,11 @@
       init.defaultBranch = "master";
       core = {
         editor = "nvim";
-        # sshCommand = "ssh.exe";
         pager = "delta";
       };
       
       gpg = {
         format = "ssh";
-        # ssh.program = "/mnt/c/Users/kylem/AppData/Local/1Password/app/8/op-ssh-sign.exe";
       };
       
       interactive.diffFilter = "delta --color-only";
