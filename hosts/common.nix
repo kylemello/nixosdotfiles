@@ -1,21 +1,14 @@
-{ config, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 
 {
-  
-
-  wsl.enable = true;
-  wsl.defaultUser = "kyle";
+  # If not WSL use the systemd-boot EFI boot loader
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-  # Use the systemd-boot EFI boot loader.
-  # boot.loader.systemd-boot.enable = true;
-  # boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.systemd-boot.enable = lib.mkIf (!config.wsl.enable) true;
+  boot.loader.efi.canTouchEfiVariables = lib.mkIf (!config.wsl.enable) true;
 
   # Set your time zone.
   time.timeZone = "America/New_York";
-
-  # Set your hostname.
-  networking.hostName = "artemis";
 
   # Enable networking with DHCP.
   networking.networkmanager.enable = true;
@@ -32,8 +25,6 @@
   # List packages you want to install.
   environment.systemPackages = with pkgs; [
     home-manager
-    podman-compose
-    dive
     fd
     wget
     fish
@@ -43,18 +34,7 @@
 
   # Enable the SSH server.
   services.openssh.enable = true;
-  services.k3s = {
-    enable = true;
-    role = "server";
-  };
 
-  networking.firewall.allowedTCPPorts = [ 22 6443 ];
-  networking.firewall.allowedTCPPortRanges = [ 
-    # This opens the default kubernetes NodePort Range
-    { from = 30000; to = 32767; }
-  ];
-  # Enable Hyper-V guest services for better integration.
-  virtualisation.hypervGuest.enable = true;
   virtualisation.containers.enable = true;
   virtualisation.podman = {
     enable = true;
@@ -63,7 +43,6 @@
     defaultNetwork.settings.dns_enabled = true;
   };
 
-  # This value determines the NixOS release from which the default
-  # settings for stateful data were taken.
-  system.stateVersion = "24.11";
+  users.mutableUsers = false;
 }
+

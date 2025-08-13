@@ -28,6 +28,7 @@
   home.packages = with pkgs; [
     bat
     bootdev-cli
+    cargo
     delta
     deno
     dive
@@ -51,6 +52,7 @@
     pnpm
     python3
     ripgrep
+    rustc
     tealdeer
     tmux
     tree-sitter
