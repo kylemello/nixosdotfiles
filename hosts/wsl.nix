@@ -1,4 +1,4 @@
-{ config, pkgs, ... }:
+{ config, pkgs, lib, ... }:
 
 {
   # Enable core WSL integration.
@@ -6,4 +6,5 @@
     enable = true;
     defaultUser = "kyle";
   };
+  users.mutableUsers = lib.mkForce true;
 }

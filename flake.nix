@@ -18,38 +18,72 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, home-manager, ... }@inputs:
-  let
-    mkNixOS = modules: nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      specialArgs = { inherit inputs; };
-      modules = [ home-manager.nixosModules.home-manager ] ++ modules;
-    };
-  in {
-    # This is now at the top level, where nixos-rebuild expects it.
-    nixosConfigurations = {
-      artemis = mkNixOS [ ./machines/artemis/configuration.nix ];
-      atlas = mkNixOS [ ./machines/atlas/configuration.nix ];
-      nixosvm = mkNixOS [ ./machines/nixosvm/configuration.nix ];
-    };
-  } // flake-utils.lib.eachDefaultSystem (system: # The '//' operator merges the two sets.
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, ... }:
     let
-      # The `system` variable from flake-utils is now used correctly.
-      pkgs = nixpkgs.legacyPackages.${system};
+      mkNixOS = { system, machineModule }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          specialArgs = { inherit inputs; };
+          modules = [
+            home-manager.nixosModules.home-manager
+            ({ ... }: {
+              home-manager.useGlobalPkgs = true;
+              home-manager.useUserPackages = true;
+              home-manager.extraSpecialArgs = { inherit inputs; };
+            })
+            nixos-wsl.nixosModules.wsl
+            machineModule
+          ];
+        };
     in {
-      # This part remains inside the loop, so it's generated for each architecture.
-      homeConfigurations = {
-        "kyle-work" = home-manager.lib.homeManagerConfiguration {
-          inherit pkgs;
-          modules = [ ./users/kyle/work-kyle.nix ];
-          extraSpecialArgs = { inherit inputs; };
-        };
-        "kmello-work" = home-manager.lib.homeManagerConfiguration {
-          inherit pkgs;
-          modules = [ ./users/kyle/work-kmello.nix ];
-          extraSpecialArgs = { inherit inputs; };
-        };
+    nixosConfigurations = {
+      artemis = mkNixOS {
+        system = "x86_64-linux";
+        machineModule = ./machines/artemis/configuration.nix;
       };
-    }
-  );
+      atlas = mkNixOS {
+        system = "x86_64-linux";
+        machineModule = ./machines/atlas/configuration.nix;
+      };
+      nixosvm = mkNixOS {
+        system = "x86_64-linux";
+        machineModule = ./machines/nixosvm/configuration.nix;
+      };
+    };
+  };
+
+  # outputs = { self, nixpkgs, flake-utils, home-manager, ... }@inputs:
+  # let
+  #   mkNixOS = modules: nixpkgs.lib.nixosSystem {
+  #     system = "x86_64-linux";
+  #     specialArgs = { inherit inputs; };
+  #     modules = [ home-manager.nixosModules.home-manager ] ++ modules;
+  #   };
+  # in {
+  #   # This is now at the top level, where nixos-rebuild expects it.
+  #   nixosConfigurations = {
+  #     artemis = mkNixOS [ ./machines/artemis/configuration.nix ];
+  #     atlas = mkNixOS [ ./machines/atlas/configuration.nix ];
+  #     nixosvm = mkNixOS [ ./machines/nixosvm/configuration.nix ];
+  #   };
+  # } // flake-utils.lib.eachDefaultSystem (system: # The '//' operator merges the two sets.
+  #   let
+  #     # The `system` variable from flake-utils is now used correctly.
+  #     pkgs = nixpkgs.legacyPackages.${system};
+  #   in {
+  #     # This part remains inside the loop, so it's generated for each architecture.
+  #     homeConfigurations = {
+  #       "kyle-work" = home-manager.lib.homeManagerConfiguration {
+  #         inherit pkgs;
+  #         modules = [ ./users/kyle/work-kyle.nix ];
+  #         extraSpecialArgs = { inherit inputs; };
+  #       };
+  #       "kmello-work" = home-manager.lib.homeManagerConfiguration {
+  #         inherit pkgs;
+  #         modules = [ ./users/kyle/work-kmello.nix ];
+  #         extraSpecialArgs = { inherit inputs; };
+  #       };
+  #     };
+  #   }
+  # );
 }

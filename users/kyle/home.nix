@@ -1,7 +1,8 @@
-{ config, pkgs, lib, ... }:
+{ config, pkgs, lib, inputs, ... }:
 
 {
   imports = [
+    inputs.catppuccin.homeModules.catppuccin
     ../../home/fish.nix
     ../../home/tmux.nix
     ../../home/git.nix

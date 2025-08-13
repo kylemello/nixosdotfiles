@@ -1,5 +1,4 @@
-{ config, pkgs, inputs, ... }:
-
+{ config, lib, pkgs, inputs, ... }:
 {
   imports = [
     ../../hosts/common.nix
