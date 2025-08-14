@@ -35,37 +35,42 @@
             machineModule
           ];
         };
-    in {
-    nixosConfigurations = {
-      artemis = mkNixOS {
-        system = "x86_64-linux";
-        machineModule = ./machines/artemis/configuration.nix;
-      };
-      atlas = mkNixOS {
-        system = "x86_64-linux";
-        machineModule = ./machines/atlas/configuration.nix;
-      };
-      nixosvm = mkNixOS {
-        system = "x86_64-linux";
-        machineModule = ./machines/nixosvm/configuration.nix;
+    in
+    flake-utils.lib.eachSystem flake-utils.lib.allSystems (system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in {
+        # Home Manager configs where HM will look:
+        # packages.<system>.homeConfigurations."<name>".activationPackage
+        packages.homeConfigurations = {
+          "kyle-work" = home-manager.lib.homeManagerConfiguration {
+            inherit pkgs;
+            modules = [ ./users/kyle/work-kyle.nix ];
+            extraSpecialArgs = { inherit inputs; };
+          };
+
+          "kmello-work" = home-manager.lib.homeManagerConfiguration {
+            inherit pkgs;
+            modules = [ ./users/kyle/work-kmello.nix ];
+            extraSpecialArgs = { inherit inputs; };
+          };
+        };
+      })
+    //
+    {
+      nixosConfigurations = {
+        artemis = mkNixOS {
+          system = "x86_64-linux";
+          machineModule = ./machines/artemis/configuration.nix;
+        };
+        atlas = mkNixOS {
+          system = "x86_64-linux";
+          machineModule = ./machines/atlas/configuration.nix;
+        };
+        nixosvm = mkNixOS {
+          system = "x86_64-linux";
+          machineModule = ./machines/nixosvm/configuration.nix;
+        };
       };
     };
-  } // flake-utils.lib.eachDefaultSystem (system:
-    let
-      pkgs = nixpkgs.legacyPackages.${system};
-    in {
-      homeConfigurations = {
-        "kyle-work" = home-manager.lib.homeManagerConfiguration {
-          inherit pkgs;
-          modules = [ ./users/kyle/work-kyle.nix ];
-          extraSpecialArgs = { inherit inputs; };
-        };
-        "kmello-work" = home-manager.lib.homeManagerConfiguration {
-          inherit pkgs;
-          modules = [ ./users/kyle/work-kmello.nix ];
-          extraSpecialArgs = { inherit inputs; };
-        };
-      };
-    }
-  );
 }
