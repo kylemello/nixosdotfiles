@@ -42,8 +42,6 @@
         smudge = "git-lfs smudge -- %f";
         process = "git-lfs filter-process";
       };
-      
-      maintenance.repo = "/home/kyle/.oh-my-zsh/repos/zsh-snap";
     };
   };
 }
