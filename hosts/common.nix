@@ -43,6 +43,6 @@
     defaultNetwork.settings.dns_enabled = true;
   };
 
-  users.mutableUsers = lib.mkDefault false;
+  users.mutableUsers = lib.mkDefault true;
 }
 
