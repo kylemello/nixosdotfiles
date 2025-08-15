@@ -18,7 +18,7 @@
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, ... }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, ... }:
     let
       mkNixOS = { system, machineModule }:
         nixpkgs.lib.nixosSystem {
@@ -40,22 +40,22 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
       in {
-        # Home Manager configs where HM will look:
-        # packages.<system>.homeConfigurations."<name>".activationPackage
-        packages.homeConfigurations = {
-          "kyle-work" = home-manager.lib.homeManagerConfiguration {
-            inherit pkgs;
-            modules = [ ./users/kyle/work-kyle.nix ];
-            extraSpecialArgs = { inherit inputs; };
-          };
-
-          "kmello-work" = home-manager.lib.homeManagerConfiguration {
-            inherit pkgs;
-            modules = [ ./users/kyle/work-kmello.nix ];
-            extraSpecialArgs = { inherit inputs; };
+        legacyPackages = pkgs // {
+          homeConfigurations = {
+            "kyle-work" = home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [ ./users/kyle/work-kyle.nix ];
+              extraSpecialArgs = { inherit inputs; };
+            };
+            "kmello@iodine" = home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [ ./users/kyle/work-kmello.nix catppuccin.homeModules ];
+              extraSpecialArgs = { inherit inputs; };
+            };
           };
         };
-      })
+      }
+    )
     //
     {
       nixosConfigurations = {

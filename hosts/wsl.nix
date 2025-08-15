@@ -6,5 +6,4 @@
     enable = true;
     defaultUser = "kyle";
   };
-  users.mutableUsers = lib.mkForce true;
 }
