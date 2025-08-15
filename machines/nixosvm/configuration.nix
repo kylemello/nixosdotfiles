@@ -2,6 +2,7 @@
 
 {
   imports = [
+    ./hardware-configuration.nix
     ../../hosts/common.nix
     ../../hosts/vm.nix
   ];
