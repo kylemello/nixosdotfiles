@@ -18,6 +18,8 @@
     extraGroups = [ "wheel" ]; # For sudo access
   };
 
+  services.openssh.ports = [ 422 ];
+
   # Assign the Home Manager profile to the user
   home-manager.users.kyle = import ../../users/kyle/home.nix;
 
