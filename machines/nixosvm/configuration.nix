@@ -8,7 +8,7 @@
   ];
 
   # Machine-specific settings
-  networking.hostName = "atlas";
+  networking.hostName = "nixosvm";
 
   # Define the user for this machine
   users.users.kyle = {
