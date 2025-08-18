@@ -5,7 +5,7 @@
     air # Live reload for golang
     cargo
     deno
-    dotenv-cli
+    doppler
     gcc
     gh
     go
