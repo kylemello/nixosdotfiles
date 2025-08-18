@@ -33,7 +33,7 @@
   ];
 
   # Enable the SSH server.
-  services.openssh.enable = true;
+  services.openssh.enable = lib.mkDefault true;
 
   virtualisation.containers.enable = true;
   virtualisation.podman = {

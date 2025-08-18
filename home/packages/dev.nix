@@ -2,8 +2,10 @@
 
 {
   home.packages = with pkgs; [
+    air # Live reload for golang
     cargo
     deno
+    dotenv-cli
     gcc
     gh
     go
