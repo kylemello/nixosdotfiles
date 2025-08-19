@@ -10,13 +10,6 @@
   # Machine-specific settings
   networking.hostName = "nixosvm";
 
-  # Define the user for this machine
-  users.users.kyle = {
-    isNormalUser = true;
-    description = "Kyle Mello";
-    extraGroups = [ "wheel" ]; # For sudo access
-  };
-
   services.openssh.ports = [ 422 ];
 
   # Assign the Home Manager profile to the user

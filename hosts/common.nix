@@ -19,12 +19,14 @@
   # Define a user account.
   users.users.kyle = {
     isNormalUser = true;
-    extraGroups = [ "wheel" ]; # To use 'sudo'
+    description = "Kyle Mello";
+    extraGroups = [ "wheel" "networkmanager" ]; # To use 'sudo'
   };
 
   # List packages you want to install.
   environment.systemPackages = with pkgs; [
     home-manager
+    podman-compose
     fd
     wget
     fish

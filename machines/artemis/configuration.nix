@@ -8,13 +8,6 @@
   # Machine-specific settings
   networking.hostName = "artemis";
 
-  # Define the user for this machine
-  users.users.kyle = {
-    isNormalUser = true;
-    description = "Kyle Mello";
-    extraGroups = [ "wheel" ]; # For sudo access
-  };
-
   systemd.user.sockets.podman = {
     enable = true;
     description = "Podman API Socket";
