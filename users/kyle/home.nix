@@ -17,10 +17,6 @@
     username = "kyle";
     homeDirectory = "/home/kyle";
     stateVersion = "25.05";
-
-    sessionVariables = {
-      DOCKER_HOST = "unix:///run/user/1000/podman/podman.sock";
-    };
   };
 
   programs.home-manager.enable = true;

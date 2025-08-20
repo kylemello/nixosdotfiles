@@ -20,13 +20,13 @@
   users.users.kyle = {
     isNormalUser = true;
     description = "Kyle Mello";
-    extraGroups = [ "wheel" "networkmanager" ]; # To use 'sudo'
+    extraGroups = [ "wheel" "networkmanager" "docker" ]; # To use 'sudo'
   };
 
   # List packages you want to install.
   environment.systemPackages = with pkgs; [
     home-manager
-    podman-compose
+    pciutils
     fd
     wget
     fish
@@ -38,11 +38,8 @@
   services.openssh.enable = lib.mkDefault true;
 
   virtualisation.containers.enable = true;
-  virtualisation.podman = {
+  virtualisation.docker = {
     enable = true;
-    dockerCompat = true;
-    dockerSocket.enable = true;
-    defaultNetwork.settings.dns_enabled = true;
   };
 }
 

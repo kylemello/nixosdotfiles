@@ -8,12 +8,6 @@
   # Machine-specific settings
   networking.hostName = "artemis";
 
-  systemd.user.sockets.podman = {
-    enable = true;
-    description = "Podman API Socket";
-    wantedBy = [ "sockets.target" ];
-  };
-
   # Assign the Home Manager profile to the user
   home-manager.users.kyle = {
     imports = [
