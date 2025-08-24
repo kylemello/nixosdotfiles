@@ -14,6 +14,7 @@
   };
 
   programs.ssh = {
+    enable = true;
     extraConfig = ''
       # ================
       # General Settings
