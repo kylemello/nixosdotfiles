@@ -6,6 +6,7 @@
 
   boot.loader.systemd-boot.enable = lib.mkIf (!config.wsl.enable) true;
   boot.loader.efi.canTouchEfiVariables = lib.mkIf (!config.wsl.enable) true;
+  boot.kernelPackages = pkgs.linuxPackages_latest;
 
   # Set your time zone.
   time.timeZone = "America/New_York";
