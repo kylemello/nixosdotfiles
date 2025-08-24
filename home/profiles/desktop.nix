@@ -19,12 +19,12 @@
       # General Settings
       # ================
       Include ~/.ssh/1Password/config
-      ForwardX11 no
 
       # For 1password-cli
       Host *
         ForwardAgent yes
         IdentitiesOnly yes
+        IdentityAgent "~/.1password/agent.sock"
 
       # =======================
       # Friend Hosts
