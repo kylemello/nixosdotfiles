@@ -6,7 +6,12 @@
       MANPAGER="nvim +Man!";
       EDITOR = "nvim";
       VISUAL = "nvim";
+      PNPM_HOME = "$HOME/.pnpm";
     };
+
+    sessionPath = [
+      "$HOME/.pnpm"
+    ];
 
     shellAliases = {
       ll="eza -laghF --icons --time-style=long-iso --group-directories-first";

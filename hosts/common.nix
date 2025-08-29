@@ -8,6 +8,8 @@
   boot.loader.efi.canTouchEfiVariables = lib.mkIf (!config.wsl.enable) true;
   boot.kernelPackages = pkgs.linuxPackages_latest;
 
+  nix.settings.trusted-users = [ "root" "kyle" ]; # Needed for devenv
+
   # Set your time zone.
   time.timeZone = "America/New_York";
 

@@ -10,7 +10,12 @@
 
   services.openssh.enable = false;
 
-  nixpkgs.config.allowUnfree = true;
+  services.openvpn.servers = {
+    jamsitVPN = { config = ''
+      config /home/kyle/openvpn/jamsitVPN.ovpn
+      auth-user-pass /home/kyle/openvpn/credentials.txt
+    ''; };
+  };
 
-  services.xserver.videoDrivers = ["nvidia"];
+  nixpkgs.config.allowUnfree = true;
 }

@@ -5,6 +5,7 @@
     air # Live reload for golang
     cargo
     deno
+    devenv
     doppler
     gcc
     gh
@@ -13,11 +14,9 @@
     jdk
     lazydocker
     lazygit
-    nodePackages."@angular/cli"
     nodejs
     pkg-config
     pnpm
-    python3
     ruby
     rustc
     tree-sitter
