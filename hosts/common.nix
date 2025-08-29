@@ -10,6 +10,12 @@
 
   nix.settings.trusted-users = [ "root" "kyle" ]; # Needed for devenv
 
+  nix.gc = {
+    automatic = true;
+    dates = "Wed *-*-* 03:00:00";
+    options = "--delete-older-than 7d";
+  };
+
   # Set your time zone.
   time.timeZone = "America/New_York";
 
