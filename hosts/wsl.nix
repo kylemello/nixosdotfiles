@@ -4,6 +4,7 @@
   # Enable core WSL integration.
   wsl = {
     enable = true;
+    docker-desktop.enable = true;
     defaultUser = "kyle";
     useWindowsDriver = true;
   };
