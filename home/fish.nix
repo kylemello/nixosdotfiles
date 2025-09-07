@@ -7,6 +7,7 @@
       EDITOR = "nvim";
       VISUAL = "nvim";
       PNPM_HOME = "$HOME/.pnpm";
+      UID = "$(id -u)";
     };
 
     sessionPath = [

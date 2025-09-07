@@ -17,6 +17,8 @@
     nodejs
     pkg-config
     pnpm
+    php
+    phpactor
     ruby
     rustc
     tree-sitter

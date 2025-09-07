@@ -16,6 +16,8 @@
     options = "--delete-older-than 7d";
   };
 
+  programs.nix-ld.enable = true;
+
   # Set your time zone.
   time.timeZone = "America/New_York";
 
@@ -39,6 +41,7 @@
     fd
     wget
     fish
+    lsof
     vim
     git
   ];
