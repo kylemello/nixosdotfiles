@@ -10,7 +10,7 @@
     fzf
     htop
     jq
-    neovim
+    neovim-unwrapped
     ripgrep
     tealdeer
     tmux
