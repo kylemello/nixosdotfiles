@@ -47,7 +47,7 @@ in
     # Corresponds to your general settings
     baseIndex = 1;
     escapeTime = 1;
-    historyLimit = 10000;
+    historyLimit = 50000;
     keyMode = "vi";
     mouse = true;
     prefix = "C-space";
@@ -70,17 +70,24 @@ in
           set -g @continuum-save-interval '1'
         '';
       }
-      mode-indicator
+      {
+        plugin = mode-indicator;
+        extraConfig = ''
+          # Status line right side
+          set -g status-right-length 100
+          set -g status-right "#{tmux_mode_indicator}#[fg=${catppuccin.yellow},bg=${catppuccin.surface0}]#{?window_zoomed_flag, 󰹑 , }#[fg=${catppuccin.text},bg=${catppuccin.surface0}] %Y-%m-%d 󰥔 %I:%M:%S%p #[fg=${catppuccin.blue},bg=${catppuccin.surface0}]#[fg=${catppuccin.base},bg=${catppuccin.blue},bold] #h #($HOME/.local/bin/distro_icon.sh || echo '') "
+        '';
+      }
     ];
 
     # All other settings go into extraConfig
     extraConfig = ''
       # --- General Settings ---
       set -ga terminal-overrides ",xterm-256color*:Tc" # Enable True Color support
-      setw -g pane-base-index 1
+      # setw -g pane-base-index 1
 
       # --- Keybindings ---
-      bind-key C-space send-prefix
+      # bind-key C-space send-prefix
 
       # Scroll with mouse wheel
       bind -n WheelUpPane if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'select-pane -t=; copy-mode -e; send-keys -M'"
@@ -132,10 +139,6 @@ in
       # Status line left side
       set -g status-left-length 100
       set -g status-left "#[fg=${catppuccin.base},bg=${catppuccin.lavender},bold] #S #[fg=${catppuccin.lavender},bg=${catppuccin.base},nobold,nounderscore,noitalics]"
-
-      # Status line right side
-      set -g status-right-length 100
-      set -g status-right "#{tmux_mode_indicator}#[fg=${catppuccin.yellow},bg=${catppuccin.surface0}]#{?window_zoomed_flag, 󰹑 , }#[fg=${catppuccin.text},bg=${catppuccin.surface0}] %Y-%m-%d 󰥔 %I:%M:%S%p #[fg=${catppuccin.blue},bg=${catppuccin.surface0}]#[fg=${catppuccin.base},bg=${catppuccin.blue},bold] #h #($HOME/.local/bin/distro_icon.sh || echo '') "
 
       # Window status
       set -g status-justify "left"

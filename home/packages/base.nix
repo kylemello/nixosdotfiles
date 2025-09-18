@@ -13,7 +13,6 @@
     neovim-unwrapped
     ripgrep
     tealdeer
-    tmux
     unzip
     xh
     zoxide
