@@ -67,6 +67,10 @@
           system = "x86_64-linux";
           machineModule = ./machines/atlas/configuration.nix;
         };
+        gateway = mkNixOS {
+          system = "x86_64-linux";
+          machineModule = ./machines/gateway/configuration.nix;
+        };
         nixosvm = mkNixOS {
           system = "x86_64-linux";
           machineModule = ./machines/nixosvm/configuration.nix;
