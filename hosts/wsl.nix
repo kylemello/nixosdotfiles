@@ -7,6 +7,7 @@
     docker-desktop.enable = true;
     defaultUser = "kyle";
     useWindowsDriver = true;
+    interop.includePath = false;
   };
 
   services.openssh.enable = false;
@@ -19,4 +20,6 @@
   };
 
   nixpkgs.config.allowUnfree = true;
+
+  environment.unixODBCDrivers = [ pkgs.unixODBCDrivers.msodbcsql18 ];
 }

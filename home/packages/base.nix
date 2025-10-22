@@ -8,6 +8,7 @@
     dust
     eza
     fzf
+    gnupg
     htop
     jq
     neovim-unwrapped

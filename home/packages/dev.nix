@@ -3,9 +3,11 @@
 {
   home.packages = with pkgs; [
     air # Live reload for golang
+    azure-cli
     cargo
     deno
     devenv
+    docker-buildx
     doppler
     gcc
     gh

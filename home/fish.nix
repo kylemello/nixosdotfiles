@@ -15,8 +15,10 @@
     ];
 
     shellAliases = {
-      ll="eza -laghF --icons --time-style=long-iso --group-directories-first";
-      l="eza -lghF --icons --time-style=long-iso --group-directories-first";
+      llr="eza -laghF --git --icons --time-style=relative --group-directories-first";
+      ll="eza -laghF --git --icons --time-style='+%Y-%m-%d %I:%M:%S %p' --group-directories-first";
+      l="eza -lghF --git --icons --time-style='+%Y-%m-%d %I:%M:%S %p' --group-directories-first";
+      wan="curl checkip.amazonaws.com";
       mysql="mysql --skip-ssl";
       yolo="git commit -m \"$(curl -s https://whatthecommit.com/index.txt)\"";
       cd="z";
@@ -103,6 +105,8 @@
     };
 
     interactiveShellInit = ''
+      bind \ct _fzf_search_directory
+      bind -M insert \ct _fzf_search_directory
       fish_vi_key_bindings
       set -g fish_greeting
       set fish_cursor_default block
