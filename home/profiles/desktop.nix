@@ -79,20 +79,12 @@
         HostName brrit.com
         User kyle
 
-      Host lawrencium
-        HostName docresolve.com
-        User kyle
-
-      Host thulium
-        HostName 52.142.49.5
-        User kyle
-
       Host iodine
         HostName 10.20.23.241
         User kmello
 
-      Host gitlab.jamsit.dev
-        HostName gitlab.jamsit.dev
+      Host gl.brrapps.io
+        HostName gl.brrapps.io
         User git
         # Port 522
 
@@ -111,10 +103,6 @@
       Host lead
         HostName 10.20.23.240
         User root
-
-      Host neodymium
-        HostName 57.151.116.136
-        User kyle
 
       Host vega
         HostName 10.20.23.254
