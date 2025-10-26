@@ -45,6 +45,16 @@
       device = "/dev/disk/by-uuid/3b7e3808-377e-4cab-a707-c8da144e6e2e";
       fsType = "ext4";
     };
+
+    "/mnt/tn/media" = {
+      device = "10.11.12.10:/mnt/Infinity/media";
+      fsType = "nfs";
+      options = [
+        "x-system.automount"
+        "noauto"
+        "nofail"
+      ];
+    };
   };
 
   networking.firewall.allowedTCPPorts = [

@@ -11,6 +11,7 @@
     unixODBC
     unixODBCDrivers.msodbcsql18
     upterm
+    unrar
     yazi
     yt-dlp
   ];
