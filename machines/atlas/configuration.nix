@@ -50,9 +50,13 @@
       device = "10.11.12.10:/mnt/Infinity/media";
       fsType = "nfs";
       options = [
-        "x-system.automount"
-        "noauto"
+        "x-systemd.automount"
+        "x-systemd.mount-timeout=10s"
+        "_netdev"
         "nofail"
+        "soft"
+        "timeo=10"
+        "retrans=3"
       ];
     };
   };
