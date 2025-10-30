@@ -13,14 +13,16 @@
     gh
     gnumake
     go
+    infisical
     jdk
     lazydocker
     lazygit
+    nodePackages."@angular/cli"
     nodejs
-    pkg-config
-    pnpm
     php
     phpactor
+    pkg-config
+    pnpm
     ruby
     rustc
     tree-sitter

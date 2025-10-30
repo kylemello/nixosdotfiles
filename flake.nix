@@ -20,11 +20,19 @@
 
   outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, ... }:
     let
+      overlays = [
+        (import ./overlays)
+      ];
+
       mkNixOS = { system, machineModule }:
         nixpkgs.lib.nixosSystem {
           inherit system;
           specialArgs = { inherit inputs; };
           modules = [
+            # Apply overlays to nixpkgs
+            ({ config, pkgs, ... }: {
+              nixpkgs.overlays = overlays;
+            })
             home-manager.nixosModules.home-manager
             ({ ... }: {
               home-manager.useGlobalPkgs = true;
@@ -38,7 +46,11 @@
     in
     flake-utils.lib.eachSystem flake-utils.lib.allSystems (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = overlays;
+          config.allowUnfree = true;
+        };
       in {
         legacyPackages = pkgs // {
           homeConfigurations = {

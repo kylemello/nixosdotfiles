@@ -41,6 +41,10 @@ Here is a breakdown of the key files and directories and their purpose.
 │   └── artemis/      # A directory for the machine with hostname 'artemis'.
 │       └── configuration.nix # Imports modules from hosts/ and sets machine details.
 |
+├── overlays/         # Package overlays for version overrides and customizations.
+│   ├── README.md     # Documentation on how to add package overrides.
+│   └── latest-packages.nix # Override packages to latest versions.
+|
 └── users/            # Top-level user profiles.
     └── kyle/
         ├── home.nix            # Main profile for all my NixOS machines.
@@ -97,3 +101,36 @@ This creates a top-down declarative structure where everything is explicitly def
 2. Add all the Home Manager configuration for that program into the new file.
 3. Import your new module in any user profile that needs it (e.g., add `../../home/neovim.nix` to the `imports` list in `users/kyle/home.nix`).
 4. Re-run the appropriate build command (`nixos-rebuild` or `home-manager switch`) to apply the changes.
+
+### Overriding Package Versions
+
+If you need the latest version of a package before it's available in the stable nixpkgs channel, you can use overlays:
+
+1. Edit `overlays/latest-packages.nix` to add your package override.
+2. The overlay will automatically be applied to all machines and home-manager configurations.
+3. See `overlays/README.md` for detailed examples and methods.
+
+**Common use cases:**
+- Getting bleeding-edge versions of development tools
+- Applying custom patches to packages
+- Using packages from nixpkgs-unstable while staying on stable
+- Building packages from the latest git source
+
+**Example:** To override neovim to version 0.10.0:
+
+```nix
+# In overlays/latest-packages.nix
+self: super: {
+  neovim = super.neovim.overrideAttrs (oldAttrs: rec {
+    version = "0.10.0";
+    src = super.fetchFromGitHub {
+      owner = "neovim";
+      repo = "neovim";
+      rev = "v${version}";
+      hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    };
+  });
+}
+```
+
+Then rebuild with `sudo nixos-rebuild switch --flake .#<machine-name>` or `home-manager switch --flake .#<profile-name>`.
