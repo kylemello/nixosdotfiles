@@ -1,7 +1,7 @@
 self: super: {
   infisical = super.stdenv.mkDerivation rec {
     pname = "infisical";
-    version = "0.43.20";
+    version = "0.43.51";
 
     src =
       let
@@ -16,7 +16,7 @@ self: super: {
         };
 
         hash = selectSystem {
-          x86_64-linux = "sha256-SzQ2b7fpdLX35H1uW+gZfi8w7Z5SUWd+3QdYehwZXCM=";
+          x86_64-linux = "sha256-WodD7aJkEBmAn4dFR5j1FXVf+/bkSscW9mEuPAVWaf8=";
           aarch64-linux = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
           x86_64-darwin = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
           aarch64-darwin = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

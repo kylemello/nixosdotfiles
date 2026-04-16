@@ -5,6 +5,7 @@
     bat
     croc
     delta
+    dig
     duf
     dust
     eza
@@ -12,6 +13,7 @@
     gnupg
     htop
     jq
+    k9s
     neovim-unwrapped
     ripgrep
     tealdeer

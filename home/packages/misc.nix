@@ -8,8 +8,8 @@
     fastfetch
     gemini-cli
     postgresql_18
-    unixODBC
-    unixODBCDrivers.msodbcsql18
+    unixodbc
+    unixodbcDrivers.msodbcsql18
     upterm
     unrar
     yazi

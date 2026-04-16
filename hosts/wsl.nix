@@ -11,15 +11,9 @@
   };
 
   services.openssh.enable = false;
-
-  services.openvpn.servers = {
-    jamsitVPN = { config = ''
-      config /home/kyle/openvpn/jamsitVPN.ovpn
-      auth-user-pass /home/kyle/openvpn/credentials.txt
-    ''; };
-  };
+  networking.wireless.enable = lib.mkForce false;
 
   nixpkgs.config.allowUnfree = true;
 
-  environment.unixODBCDrivers = [ pkgs.unixODBCDrivers.msodbcsql18 ];
+  environment.unixODBCDrivers = [ pkgs.unixodbcDrivers.msodbcsql18 ];
 }

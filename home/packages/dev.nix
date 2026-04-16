@@ -3,28 +3,33 @@
 {
   home.packages = with pkgs; [
     air # Live reload for golang
+    ansible
     azure-cli
     cargo
     deno
     devenv
     docker-buildx
-    doppler
+    dolt
     gcc
     gh
+    glab
     gnumake
     go
     infisical
     jdk
+    kubectl
+    kubernetes-helm
     lazydocker
     lazygit
-    nodePackages."@angular/cli"
-    nodejs
+    nodejs_24
     php
     phpactor
     pkg-config
     pnpm
     ruby
     rustc
+    terraform
+    tokei
     tree-sitter
     uv
   ];

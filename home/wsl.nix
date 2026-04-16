@@ -18,6 +18,7 @@
       "/mnt/c/WINDOWS/System32/OpenSSH/"
       "/mnt/c/Program Files/OpenSSH/"
       "/mnt/c/Users/kylem/AppData/Local/Programs/Microsoft VS Code/bin/code"
+      "/mnt/c/Users/kylem/AppData/Local/Programs/Zed/bin/"
     ];
   };
 

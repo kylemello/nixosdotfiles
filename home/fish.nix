@@ -12,6 +12,7 @@
 
     sessionPath = [
       "$HOME/.pnpm"
+      "/home/kyle/.local/bin"
     ];
 
     shellAliases = {
