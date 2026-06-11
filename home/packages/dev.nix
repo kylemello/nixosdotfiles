@@ -4,12 +4,15 @@
   home.packages = with pkgs; [
     air # Live reload for golang
     ansible
+    awscli2
     azure-cli
+    bun
     cargo
     deno
     devenv
     docker-buildx
     dolt
+    emacs-nox
     gcc
     gh
     glab
@@ -28,6 +31,7 @@
     pnpm
     ruby
     rustc
+    sqlite
     terraform
     tokei
     tree-sitter

@@ -11,6 +11,7 @@
   };
 
   services.openssh.enable = false;
+  services.pulseaudio.enable = true;
   networking.wireless.enable = lib.mkForce false;
 
   nixpkgs.config.allowUnfree = true;

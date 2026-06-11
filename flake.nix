@@ -16,12 +16,18 @@
       url = "github:catppuccin/nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Always-fresh Claude Code (upstream refreshes hourly). Intentionally NOT
+    # following nixpkgs so we hit their Cachix-cached prebuilt binaries instead
+    # of rebuilding locally on every version bump.
+    claude-code.url = "github:sadjow/claude-code-nix";
   };
 
-  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, ... }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, claude-code, ... }:
     let
       overlays = [
         (import ./overlays)
+        claude-code.overlays.default
       ];
 
       mkNixOS = { system, machineModule }:

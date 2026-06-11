@@ -13,6 +13,7 @@
     sessionPath = [
       "$HOME/.pnpm"
       "/home/kyle/.local/bin"
+      "$HOME/.config/emacs/bin"
     ];
 
     shellAliases = {
@@ -73,6 +74,32 @@
     ];
 
     functions = {
+      git-clean-gone = {
+        description = "Delete local branches whose remote upstream is gone";
+        body = ''
+          git fetch --prune
+          set -l branches (git for-each-ref --format '%(refname:short) %(upstream:track)' refs/heads | string match -r --groups-only '^(\S+) \[gone\]$')
+          if test (count $branches) -eq 0
+              echo "No gone branches to delete."
+              return 0
+          end
+          echo "The following branches will be deleted:"
+          for branch in $branches
+              echo "  $branch"
+          end
+          read -l -P 'Delete these branches? [y/N] ' confirm
+          switch $confirm
+              case Y y
+                  for branch in $branches
+                      git branch -D $branch
+                  end
+              case '*'
+                  echo "Aborted."
+                  return 1
+          end
+        '';
+      };
+
       fish_prompt = ''
         set -l last_status $status
         set -l normal (set_color normal)
