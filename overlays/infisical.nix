@@ -1,31 +1,26 @@
-self: super: {
+# Version + hashes live in ./_sources/infisical.json so they can be bumped
+# automatically: run `nix run .#update-overlays`.
+self: super:
+let
+  sources = builtins.fromJSON (builtins.readFile ./_sources/infisical.json);
+  inherit (super.stdenv.hostPlatform) system;
+
+  suffix = {
+    x86_64-linux = "linux_amd64";
+    aarch64-linux = "linux_arm64";
+    x86_64-darwin = "darwin_amd64";
+    aarch64-darwin = "darwin_arm64";
+  }.${system};
+in
+{
   infisical = super.stdenv.mkDerivation rec {
     pname = "infisical";
-    version = "0.43.51";
+    version = sources.version;
 
-    src =
-      let
-        inherit (super.stdenv.hostPlatform) system;
-        selectSystem = attrs: attrs.${system};
-
-        suffix = selectSystem {
-          x86_64-linux = "linux_amd64";
-          aarch64-linux = "linux_arm64";
-          x86_64-darwin = "darwin_amd64";
-          aarch64-darwin = "darwin_arm64";
-        };
-
-        hash = selectSystem {
-          x86_64-linux = "sha256-WodD7aJkEBmAn4dFR5j1FXVf+/bkSscW9mEuPAVWaf8=";
-          aarch64-linux = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-          x86_64-darwin = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-          aarch64-darwin = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        };
-      in
-      super.fetchurl {
-        url = "https://github.com/Infisical/cli/releases/download/v${version}/cli_${version}_${suffix}.tar.gz";
-        sha256 = hash;
-      };
+    src = super.fetchurl {
+      url = "https://github.com/Infisical/cli/releases/download/v${version}/cli_${version}_${suffix}.tar.gz";
+      hash = sources.hashes.${system};
+    };
 
     nativeBuildInputs = [ super.installShellFiles ];
 
@@ -78,4 +73,3 @@ self: super: {
     };
   };
 }
-

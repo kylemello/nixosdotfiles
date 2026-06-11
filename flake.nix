@@ -72,6 +72,38 @@
             };
           };
         };
+
+        # `nix run .#update-overlays` bumps every overlay to its latest
+        # upstream version. It auto-discovers overlays/*.update.sh (same spirit
+        # as overlays/default.nix) and runs each, rewriting overlays/_sources/.
+        apps.update-overlays =
+          let
+            runner = pkgs.writeShellScriptBin "update-overlays" ''
+              set -euo pipefail
+              export PATH="${pkgs.lib.makeBinPath (with pkgs; [ curl jq coreutils gnugrep gnused git ])}:$PATH"
+              export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              root="$(git rev-parse --show-toplevel)"
+              overlays_dir="$root/overlays"
+              shopt -s nullglob
+              any=0
+              for updater in "$overlays_dir"/*.update.sh; do
+                any=1
+                name="$(basename "$updater" .update.sh)"
+                echo ">>> Updating overlay: $name"
+                bash "$updater" "$overlays_dir/_sources/$name.json"
+              done
+              if [ "$any" -eq 0 ]; then
+                echo "No overlays/*.update.sh updaters found." >&2
+                exit 1
+              fi
+              git -C "$root" add overlays/_sources
+              echo
+              echo "Overlays bumped. Review with: git diff -- overlays/_sources"
+            '';
+          in {
+            type = "app";
+            program = "${runner}/bin/update-overlays";
+          };
       }
     )
     //
