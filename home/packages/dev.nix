@@ -6,6 +6,7 @@
     ansible
     awscli2
     azure-cli
+    bitbucket-cli
     bun
     cargo
     deno

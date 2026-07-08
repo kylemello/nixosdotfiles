@@ -21,13 +21,25 @@
     # following nixpkgs so we hit their Cachix-cached prebuilt binaries instead
     # of rebuilding locally on every version bump.
     claude-code.url = "github:sadjow/claude-code-nix";
+
+    # Bitbucket CLI (bkt) — not packaged in nixpkgs; pulled from its upstream
+    # flake and surfaced as pkgs.bitbucket-cli via the overlay below.
+    bitbucket-cli = {
+      url = "github:avivsinai/bitbucket-cli";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, claude-code, ... }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, claude-code, bitbucket-cli, ... }:
     let
       overlays = [
         (import ./overlays)
         claude-code.overlays.default
+        # Expose the bitbucket-cli flake's package as pkgs.bitbucket-cli.
+        # Named to avoid shadowing nixpkgs' unrelated `bkt` (a caching tool).
+        (final: prev: {
+          bitbucket-cli = bitbucket-cli.packages.${prev.stdenv.hostPlatform.system}.default;
+        })
       ];
 
       mkNixOS = { system, machineModule }:
