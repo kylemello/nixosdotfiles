@@ -22,4 +22,10 @@
     enable = true;
     polkitPolicyOwners = [ "kyle" ];
   };
+
+  # Unlock the GNOME keyring from your password at the gdm login screen.
+  # (`services.gnome.gnome-keyring.enable` in hosts/common.nix wires this up for
+  # the console `login` PAM service but not for gdm, so graphical logins would
+  # otherwise leave the keyring locked and libsecret clients would prompt.)
+  security.pam.services.gdm-password.enableGnomeKeyring = true;
 }

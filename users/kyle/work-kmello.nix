@@ -19,6 +19,7 @@
 
   catppuccin = {
     enable = true;
+    autoEnable = true; # explicit per-port auto-enroll; silences migration warning
     flavor = "mocha";
   };
 

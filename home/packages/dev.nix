@@ -33,6 +33,7 @@
     ruby
     rustc
     sqlite
+    tea
     terraform
     tokei
     tree-sitter
