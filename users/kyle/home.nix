@@ -7,6 +7,7 @@
     ../../home/git.nix
     ../../home/tmux.nix
     ../../home/catppuccin.nix
+    ../../home/claude-code.nix
 
     ../../home/packages/base.nix
     ../../home/packages/dev.nix
