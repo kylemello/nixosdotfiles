@@ -2,6 +2,7 @@
 
 {
   home.packages = with pkgs; [
+    _1password-cli
     air # Live reload for golang
     ansible
     awscli2
@@ -26,6 +27,7 @@
     lazydocker
     lazygit
     nodejs_24
+    openssl
     php
     phpactor
     pkg-config
