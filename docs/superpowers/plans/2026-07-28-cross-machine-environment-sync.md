@@ -1246,7 +1246,7 @@ check "safety: ref created" \
   "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null && echo yes || echo no)" "yes"
 
 # Simulate the destructive half of `wip pull`.
-git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/otherhost -- .
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/otherhost -- :/
 check "safety: pull did overwrite the local edit" "$(cat "$REPO/tracked.txt")" "from-other"
 
 # Now undo it.
