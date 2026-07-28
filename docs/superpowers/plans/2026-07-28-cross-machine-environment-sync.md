@@ -71,7 +71,8 @@ Confirmed on 2026-07-28; do not re-derive.
 | `home/claude.nix` | `mkOutOfStoreSymlink`s for `~/.claude/*` |
 | `home/sync.nix` | Syncthing client for `~/notes`, `~/scratch` |
 | `home/drift.nix` | Flake-staleness warning at shell start |
-| `claude/` | `CLAUDE.md`, `skills/`, `agents/`, `commands/` |
+| `claude/` | `CLAUDE.md`, `skills/`, `agents/`, `commands/`, `settings.json` (shared) |
+| `claude/local/<host>.json` | per-machine settings: absolute marketplace paths |
 | `tests/wip.test.sh` | Bash test suite for the `wip` snapshot core |
 
 **Modified**
@@ -80,9 +81,9 @@ Confirmed on 2026-07-28; do not re-derive.
 |---|---|
 | `machines/gateway/configuration.nix` | Import `sync-hub`; CI hardening |
 | `home/folders.nix` | Canonical layout; artemis-only Windows links |
-| `home/wsl.nix` | `kyle.wip.host = "artemis"` |
-| `home/darwin.nix` | `kyle.wip.host = "ariane"` |
-| `home/fish.nix` | Binding order for Atuin under vi mode |
+| `home/wsl.nix` | `kyle.wip.host` / `kyle.claude.host` = `"artemis"`; Windows links |
+| `home/darwin.nix` | `kyle.wip.host` / `kyle.claude.host` = `"ariane"` |
+| `home/fish.nix` | Binding order for Atuin under vi mode; `q` function from artemis |
 | `users/kyle/home.nix` | Import new modules |
 | `users/kyle/ariane.nix` | Import new modules |
 
@@ -1616,29 +1617,176 @@ fuzzy; the HM example defaults to prefix."
 
 ---
 
-## Task 11: Claude config as live symlinks
+## Task 11: Reconcile and share Claude config
 
 **Files:**
-- Create: `home/claude.nix`, `claude/`
+- Create: `home/claude.nix`, `claude/`, `claude/local/{artemis,ariane}.json`
 - Modify: `users/kyle/home.nix`, `users/kyle/ariane.nix`
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: `~/.claude/{CLAUDE.md,skills,agents,commands}` versioned in the flake repo, writable in place
+- Produces: `~/.claude/{CLAUDE.md,skills,agents,commands,settings.json,settings.local.json}` versioned in the flake, writable in place, with machine-specific values isolated per host
 
-- [ ] **Step 1: Move the current content into the repo**
+**Why this is a reconciliation and not a copy.** The two machines have genuinely
+divergent Claude config, in *both* directions. A naive "copy from one machine
+into the repo, symlink on both" silently destroys whatever only existed on the
+second machine. Measured 2026-07-28:
+
+| Only on artemis | Only on ariane |
+|---|---|
+| `model: "opus[1m]"` | `~/.claude/CLAUDE.md` (artemis has **no** such file) |
+| `includeCoAuthoredBy: false` | `skills/deploying-laravel-cloud` (artemis's `skills/` is empty) |
+| `permissions.allow: [WebSearch, WebFetch]` | plugins: `typescript-lsp`, `pr-review-toolkit`, `skill-creator` |
+| plugins: `ui-ux-pro-max`, `security-guidance`, `claude-code-setup`, `microsoft-docs` | `voice`, `voiceEnabled`, `attribution.commit` |
+| plugins: `kmello-skills@kmello`, `aegis-jira@kmello-dev`, `work-os@kmello-dev` | |
+| `extraKnownMarketplaces` (4 entries, 2 with absolute paths) | |
+| `spinnerVerbs` (98 custom verbs) | |
+| `skipWorkflowUsageWarning`, `remoteControlAtStartup` | |
+
+**Verified prerequisite (2026-07-28): Claude Code writes *through* a symlink.**
+Tested by replacing `~/.claude/settings.json` with a symlink and running
+`claude plugin disable typescript-lsp@claude-plugins-official`. The symlink
+survived, and the change landed in the target file. So `mkOutOfStoreSymlink`
+works for `settings.json` and `/config`, `/plugin`, and "always allow" keep
+functioning. (Original restored byte-for-byte afterward; sha matched.)
+
+### Three layers of path dependency
+
+1. `settings.json` → `extraKnownMarketplaces.kmello` = `/home/kyle/personal/claude-plugins`,
+   `.kmello-dev` = `/home/kyle/work/dev-plugins`. Different on macOS.
+2. Inside `claude-plugins`: `kmello-skills/skills/managing-homebox/SKILL.md:9,16`
+   hardcodes `/home/kyle/personal/homebox`. Fixed in Task 14.
+   (`dev-plugins` is clean — no absolute paths.)
+3. The repos themselves: `claude-plugins`, `dev-plugins`, and `homebox` all exist
+   on artemis and are **absent on ariane**.
+
+**Ordering:** step 1 below must complete before ariane's custom marketplaces
+resolve, or Claude Code will log missing-marketplace errors on every start.
+
+- [ ] **Step 1: Clone the prerequisite repos onto ariane**
+
+The two custom marketplaces are `directory` sources, so the repos must exist
+before the settings referencing them are applied.
 
 ```bash
-mkdir -p claude
-for p in CLAUDE.md skills agents commands; do
-  [ -e "$HOME/.claude/$p" ] && cp -R "$HOME/.claude/$p" "claude/$p"
-done
-mkdir -p claude/skills claude/agents claude/commands
-touch claude/skills/.keep claude/agents/.keep claude/commands/.keep
-git add claude/
+git clone git@github.com:kylemello/claude-plugins.git ~/personal/claude-plugins
+git clone git@github.com:kylemello/dev-plugins.git    ~/work/dev-plugins
+git clone git@gitea.kmello.dev:kylemello/homebox-manager.git ~/personal/homebox
 ```
 
-- [ ] **Step 2: Write the module**
+Note homebox's origin is your **self-hosted Gitea** (`gitea.kmello.dev`), not
+GitHub, and the directory name (`homebox`) differs from the repo name
+(`homebox-manager`) — hence the explicit target path. Confirm ariane can reach
+Gitea before relying on it:
+```bash
+ssh -T git@gitea.kmello.dev 2>&1 | head -2
+ls -d ~/personal/claude-plugins ~/work/dev-plugins ~/personal/homebox
+```
+
+- [ ] **Step 2: Union the two settings.json into the repo**
+
+Merged with `jq` rather than by hand, so the 98 `spinnerVerbs` and 19 plugin
+entries are copied exactly rather than transcribed. `*` deep-merges objects;
+the only key both files set is `permissions.defaultMode`, and both say `auto`.
+
+```bash
+mkdir -p claude/local
+ssh artemis "bash -lc 'cat ~/.claude/settings.json'" > /tmp/artemis-settings.json
+cp ~/.claude/settings.json /tmp/ariane-settings.json
+
+# artemis first so ariane's unique keys land on top; artemis's model and
+# spinnerVerbs survive because ariane has no such keys.
+jq -s '.[0] * .[1]' /tmp/artemis-settings.json /tmp/ariane-settings.json \
+  > /tmp/merged.json
+
+# extraKnownMarketplaces is per-machine (absolute paths), so it leaves the
+# shared file entirely. ALL four entries move, not just the two with paths —
+# it is unverified whether settings.local.json deep-merges or replaces this
+# key, and moving all of them makes the answer irrelevant.
+jq 'del(.extraKnownMarketplaces)' /tmp/merged.json > claude/settings.json
+
+# Sanity: every plugin from both machines is present.
+jq -r '.enabledPlugins | keys[]' claude/settings.json | wc -l   # expect 19
+jq -r '.model, .effortLevel, .editorMode' claude/settings.json  # opus[1m] xhigh vim
+jq '.spinnerVerbs.verbs | length' claude/settings.json          # expect 98
+```
+
+- [ ] **Step 3: Write the per-machine files**
+
+Paths differ per host, so these are the only divergent files. Include ariane's
+existing podman permissions so nothing is lost.
+
+`claude/local/artemis.json`:
+```json
+{
+  "extraKnownMarketplaces": {
+    "claude-code-plugins": {
+      "source": { "source": "github", "repo": "anthropics/claude-code" }
+    },
+    "ui-ux-pro-max-skill": {
+      "source": { "source": "github", "repo": "nextlevelbuilder/ui-ux-pro-max-skill" }
+    },
+    "kmello": {
+      "source": { "source": "directory", "path": "/home/kyle/personal/claude-plugins" }
+    },
+    "kmello-dev": {
+      "source": { "source": "directory", "path": "/home/kyle/work/dev-plugins" }
+    }
+  }
+}
+```
+
+`claude/local/ariane.json` — same, with `/Users/kyle` paths, plus the podman
+permissions that were already in ariane's `settings.local.json`:
+```json
+{
+  "extraKnownMarketplaces": {
+    "claude-code-plugins": {
+      "source": { "source": "github", "repo": "anthropics/claude-code" }
+    },
+    "ui-ux-pro-max-skill": {
+      "source": { "source": "github", "repo": "nextlevelbuilder/ui-ux-pro-max-skill" }
+    },
+    "kmello": {
+      "source": { "source": "directory", "path": "/Users/kyle/personal/claude-plugins" }
+    },
+    "kmello-dev": {
+      "source": { "source": "directory", "path": "/Users/kyle/work/dev-plugins" }
+    }
+  },
+  "permissions": {
+    "allow": [
+      "Bash(podman ps:*)",
+      "Bash(podman stop *)",
+      "Bash(podman rm *)",
+      "Bash(podman volume *)"
+    ]
+  }
+}
+```
+
+- [ ] **Step 4: Union CLAUDE.md and skills**
+
+artemis has no `CLAUDE.md` at all, so ariane's is the whole content. Reword the
+heading — once shared it is no longer "this machine".
+
+```bash
+cp ~/.claude/CLAUDE.md claude/CLAUDE.md
+sed -i '' 's/^# User preferences (all projects on this machine)$/# User preferences (all projects, all machines)/' claude/CLAUDE.md
+
+# artemis's skills/ is empty; ariane has one. Union = ariane's.
+mkdir -p claude/skills claude/agents claude/commands
+cp -R ~/.claude/skills/deploying-laravel-cloud claude/skills/
+touch claude/agents/.keep claude/commands/.keep
+
+# Confirm nothing on artemis is being dropped.
+ssh artemis "bash -lc 'ls ~/.claude/skills ~/.claude/agents ~/.claude/commands 2>&1'"
+```
+Expected: artemis's `skills/` empty, `agents/` and `commands/` absent. If any
+has content, copy it in before continuing — that is the loss this task exists
+to prevent.
+
+- [ ] **Step 5: Write the module**
 
 Create `home/claude.nix`:
 
@@ -1648,62 +1796,127 @@ Create `home/claude.nix`:
 let
   # Point at the live working copy, not the nix store, so edits take effect
   # immediately and land in git. mkOutOfStoreSymlink is what makes the target
-  # writable — a plain home.file source would be a read-only store path.
+  # writable — a plain home.file source would be a read-only store path, and
+  # Claude Code needs to write settings.json for /config and /plugin to work.
   repo = "${config.home.homeDirectory}/nixosdotfiles/claude";
   link = p: config.lib.file.mkOutOfStoreSymlink "${repo}/${p}";
 in
 {
-  # Deliberately NOT managed here:
-  #   settings.json    Claude Code rewrites it itself; fighting for ownership
-  #                    would clobber changes made via /config.
-  #   projects/        session transcripts, machine-specific paths, large
-  #   history.jsonl    append-only from two machines, would conflict
-  #   .credentials.json  secret
-  #   cache/ daemon/ session-env/ shell-snapshots/ telemetry/ file-history/
-  #   backups/         all derived or machine-local
-  home.file = {
-    ".claude/CLAUDE.md".source = link "CLAUDE.md";
-    ".claude/skills".source    = link "skills";
-    ".claude/agents".source    = link "agents";
-    ".claude/commands".source  = link "commands";
+  options.kyle.claude.host = lib.mkOption {
+    type = lib.types.str;
+    description = ''
+      Which claude/local/<host>.json this machine uses. Set alongside
+      kyle.wip.host in home/wsl.nix and home/darwin.nix.
+    '';
+    example = "artemis";
+  };
+
+  config = {
+    # Verified 2026-07-28: Claude Code writes THROUGH these symlinks rather than
+    # replacing them, so /config, /plugin and "always allow" all keep working
+    # and their changes land in git.
+    #
+    # settings.json is shared: enabling a plugin on one machine propagates to
+    # the other on the next `git pull`. settings.local.json is per-host, holding
+    # only what genuinely cannot be shared (absolute marketplace paths).
+    #
+    # Deliberately NOT managed:
+    #   projects/          session transcripts, machine-specific paths, large
+    #   history.jsonl      append-only from two machines, would conflict
+    #   .credentials.json  secret
+    #   .claude.json       129 KB of per-project state and MCP servers; uses
+    #                      write-then-rename (a .tmp.<pid> file was observed),
+    #                      so symlinking it is unsafe
+    #   cache/ daemon/ session-env/ shell-snapshots/ telemetry/ file-history/
+    #   backups/ plugins/  all derived or machine-local
+    home.file = {
+      ".claude/CLAUDE.md".source          = link "CLAUDE.md";
+      ".claude/skills".source             = link "skills";
+      ".claude/agents".source             = link "agents";
+      ".claude/commands".source           = link "commands";
+      ".claude/settings.json".source      = link "settings.json";
+      ".claude/settings.local.json".source = link "local/${config.kyle.claude.host}.json";
+    };
   };
 }
 ```
 
-- [ ] **Step 3: Import on both profiles**
+- [ ] **Step 6: Set the host and import on both profiles**
 
-Add `../../home/claude.nix` to `imports` in `users/kyle/home.nix` and `users/kyle/ariane.nix`.
+Append to `home/wsl.nix`:
+```nix
+  kyle.claude.host = "artemis";
+```
 
-- [ ] **Step 4: Verify**
+Append to `home/darwin.nix`:
+```nix
+  kyle.claude.host = "ariane";
+```
+
+Add `../../home/claude.nix` to `imports` in `users/kyle/home.nix` and
+`users/kyle/ariane.nix`.
+
+- [ ] **Step 7: Verify it evaluates and picks the right local file**
 
 ```bash
-git add home/claude.nix
+git add home/claude.nix claude/
 nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+nix eval --raw .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.config.kyle.claude.host
 ```
-Expected: a store path.
+Expected: two store paths, then `ariane`.
 
-- [ ] **Step 5: Confirm the links are writable after activation**
+- [ ] **Step 8: Activate and confirm writes reach git**
+
+Home Manager refuses to clobber unmanaged files, so back them up first — `-b`
+renames anything in the way to `<file>.backup` instead of failing.
 
 ```bash
-home-manager switch --flake .#ariane
-readlink ~/.claude/CLAUDE.md
-echo "# test" >> ~/.claude/CLAUDE.md && git -C ~/nixosdotfiles status --short claude/
-git -C ~/nixosdotfiles checkout -- claude/CLAUDE.md
-```
-Expected: the symlink resolves to `~/nixosdotfiles/claude/CLAUDE.md` (not `/nix/store/...`), the append succeeds, and git reports the file as modified. If the target is a store path, `mkOutOfStoreSymlink` was not used.
+home-manager switch -b backup --flake .#ariane
 
-- [ ] **Step 6: Commit**
+readlink ~/.claude/settings.json        # → ~/nixosdotfiles/claude/settings.json
+readlink ~/.claude/settings.local.json  # → ~/nixosdotfiles/claude/local/ariane.json
+
+# A real settings write must land in the repo.
+claude plugin disable typescript-lsp@claude-plugins-official
+git -C ~/nixosdotfiles status --short claude/     # expect: M claude/settings.json
+claude plugin enable typescript-lsp@claude-plugins-official
+git -C ~/nixosdotfiles checkout -- claude/settings.json
+```
+Expected: both symlinks resolve into the repo (not `/nix/store/...`), and the
+plugin toggle shows up as a git modification. If `git status` is clean after the
+toggle, the write did not reach the repo — stop and re-check the symlink.
+
+- [ ] **Step 9: Confirm Claude Code is happy on both**
 
 ```bash
-git add claude/ home/claude.nix users/kyle/home.nix users/kyle/ariane.nix
-git commit -m "claude: version CLAUDE.md/skills/agents/commands in the flake
+claude doctor 2>&1 | tail -20
+ssh artemis "bash -lc 'claude doctor 2>&1 | tail -20'"
+```
+Expected: no missing-marketplace or unreadable-settings errors. A missing
+marketplace on ariane means Step 1's clones did not land.
 
-mkOutOfStoreSymlink keeps them writable and edits land in git. settings.json
-stays unmanaged because Claude Code rewrites it."
+- [ ] **Step 10: Commit**
+
+```bash
+git add claude/ home/claude.nix home/wsl.nix home/darwin.nix \
+        users/kyle/home.nix users/kyle/ariane.nix
+git commit -m "claude: reconcile and share config across both machines
+
+Union of both machines' settings.json rather than a copy from one --
+artemis contributed model opus[1m], the WebSearch/WebFetch allowlist,
+spinnerVerbs and 7 plugins; ariane contributed CLAUDE.md (artemis had
+none), the deploying-laravel-cloud skill, and 3 plugins. Merged with jq
+so nothing was transcribed by hand.
+
+settings.json is shared through the repo, so /config and /plugin changes
+propagate between machines via git -- verified that Claude Code writes
+through the symlink rather than replacing it. extraKnownMarketplaces has
+absolute, platform-specific paths, so all four entries live in
+per-host claude/local/<host>.json instead."
 ```
 
 ---
-
 ## Task 12: Syncthing clients for loose files
 
 **Files:**
@@ -1902,6 +2115,158 @@ git commit -m "home: warn at shell start when the flake has moved since switch"
 
 ---
 
+## Task 14: Reconcile the non-Claude divergence
+
+**Files:**
+- Modify: `home/fish.nix`, `home/packages/dev.nix`
+- External: `~/personal/claude-plugins` (a separate repo — its own commit)
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: `q` available on both machines; `sqlc` from nixpkgs; the homebox skill portable
+
+Surveyed 2026-07-28. `~/.config` divergence (34 entries on artemis vs 12 on
+ariane) is **deliberately deferred** — most of it is tool-generated, and it is
+easier to reconcile once the flake and `~/notes` are already shared.
+
+Homebrew was surveyed and **left alone**. The premise that brew formulae shadow
+Nix does not hold: `~/.nix-profile/bin` is PATH position 10 and
+`/opt/homebrew/bin` is 13, so **Nix already wins**. The formulae that do resolve
+to Homebrew (`composer`, `fnm`, `rbenv`, `ripgrep-all`, `bash`) are ones Nix
+provides nothing by that name — removing them would break `composer` outright
+and delete `ripgrep-all` entirely. Only brew's `coreutils` is redundant, and it
+installs `g`-prefixed names that coexist harmlessly.
+
+- [ ] **Step 1: Move `q.fish` into the flake**
+
+artemis has a hand-written `~/.config/fish/functions/q.fish` — an AI
+command-suggestion function — that ariane lacks entirely. It is not
+Nix-managed, so it exists on exactly one machine.
+
+Its system prompt hardcodes `"fish shell on NixOS/WSL2"`, which is wrong on
+macOS, so the platform string comes from Nix instead.
+
+Pull the current source and add it to `programs.fish.functions` in
+`home/fish.nix`:
+
+```bash
+ssh artemis "bash -lc 'cat ~/.config/fish/functions/q.fish'" > /tmp/q.fish
+```
+
+In `home/fish.nix`, inside `programs.fish.functions`, add `q` with the body from
+`/tmp/q.fish` minus its `function q ... end` wrapper (Home Manager supplies
+that), and with this one line changed:
+
+```nix
+      # Platform string comes from Nix so the prompt is correct on both hosts;
+      # the original hardcoded "NixOS/WSL2", which is wrong on macOS.
+      q = {
+        description = "AI command suggestion";
+        body = ''
+          # ... body from /tmp/q.fish, with the system_prompt line replaced by:
+          set -l system_prompt "You are a command generator for fish shell on ${
+            if pkgs.stdenv.isDarwin then "macOS (nix-managed)" else "NixOS/WSL2"
+          }. Output ONLY the raw shell command. No explanations, no markdown, no backticks, no code blocks. If multiple commands are needed, join with && or ; on one line."
+        '';
+      };
+```
+
+Then remove the now-shadowed hand-made copy on artemis, so the Nix-generated one
+is authoritative:
+
+```bash
+ssh artemis "bash -lc 'mv ~/.config/fish/functions/q.fish ~/.config/fish/functions/q.fish.pre-nix'"
+```
+
+- [ ] **Step 2: Verify `q` exists on both**
+
+```bash
+git add home/fish.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+```
+Expected: two store paths. After activation, `type q` in fish resolves on both,
+and `q --help`-style misuse (`q` with no args) prints the usage line.
+
+- [ ] **Step 3: Add `sqlc` to the shared package set**
+
+artemis has `sqlc` installed via `go install` into `~/go/bin`; ariane does not.
+It is in nixpkgs, so it belongs in the shared set rather than a per-machine
+imperative install. Add to `home/packages/dev.nix`, alphabetically after `sqlite`:
+
+```nix
+    sqlc
+```
+
+Then drop the imperative copy so Nix owns it:
+
+```bash
+ssh artemis "bash -lc 'rm -f ~/go/bin/sqlc'"
+```
+
+`air` is also in `~/go/bin` on both machines but is *already* in `dev.nix`, so
+the go-installed copies are redundant shadows — remove those too:
+
+```bash
+ssh artemis "bash -lc 'rm -f ~/go/bin/air'"
+rm -f ~/go/bin/air
+```
+
+- [ ] **Step 4: Verify**
+
+```bash
+git add home/packages/dev.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+```
+Expected: a store path. After activation, `which sqlc` resolves under
+`~/.nix-profile/bin`, not `~/go/bin`.
+
+- [ ] **Step 5: Fix the hardcoded path in the plugin repo**
+
+This is a commit to `~/personal/claude-plugins`, **not** to this flake.
+`kmello-skills/skills/managing-homebox/SKILL.md` hardcodes an absolute
+`/home/kyle/...` path, so the skill is broken on macOS.
+
+```bash
+cd ~/personal/claude-plugins
+grep -n '/home/kyle' kmello-skills/skills/managing-homebox/SKILL.md
+```
+Expected: two hits, lines 9 and 16.
+
+Replace both with `~/personal/homebox`, which resolves on both platforms:
+
+```bash
+sed -i '' 's#/home/kyle/personal/homebox#~/personal/homebox#g' \
+  kmello-skills/skills/managing-homebox/SKILL.md
+grep -n 'homebox' kmello-skills/skills/managing-homebox/SKILL.md
+git add kmello-skills/skills/managing-homebox/SKILL.md
+git commit -m "managing-homebox: use ~/personal/homebox instead of an absolute path
+
+The skill hardcoded /home/kyle/personal/homebox, which does not exist on
+macOS. ~ resolves on both hosts."
+git push
+```
+
+Then pull it on artemis so both machines agree:
+```bash
+ssh artemis "bash -lc 'git -C ~/personal/claude-plugins pull'"
+```
+
+`dev-plugins` was checked and contains no absolute paths — nothing to do there.
+
+- [ ] **Step 6: Commit the flake side**
+
+```bash
+git add home/fish.nix home/packages/dev.nix
+git commit -m "home: share q.fish and sqlc across both machines
+
+q.fish was hand-written on artemis only and unknown to Nix; it now lives
+in home/fish.nix with the platform string injected rather than hardcoded
+to NixOS/WSL2. sqlc moves from a go install on artemis into the shared
+package set. Redundant go-installed copies of air removed on both."
+```
+
+---
 # Rollout
 
 Deploy in dependency order. Each is independently revertible with `home-manager switch --rollback` or `nixos-rebuild --rollback`.
@@ -1927,6 +2292,11 @@ cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
 - [ ] `Ctrl+T`, `Ctrl+Alt+L`, `Ctrl+Alt+S`, `Ctrl+V`, `Ctrl+Alt+P` still work
 - [ ] A file dropped in `~/notes` reaches both other machines
 - [ ] `~/.claude/skills` resolves to `~/nixosdotfiles/claude/skills` and is writable
+- [ ] `claude plugin disable <x>` on one machine shows as a git modification to `claude/settings.json`; after pull, the other machine agrees
+- [ ] `claude doctor` is clean on **both** machines — no missing-marketplace errors
+- [ ] `jq '.enabledPlugins | keys | length' ~/.claude/settings.json` is 19 on both
+- [ ] `type q` resolves in fish on both machines
+- [ ] `which sqlc` resolves under `~/.nix-profile/bin`, not `~/go/bin`
 - [ ] `ssh gateway "bash -lc 'sudo -u ci ls /home/kyle'"` fails
 - [ ] Adding a package on one machine produces the drift warning on the other
 
@@ -1935,4 +2305,16 @@ cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
 - **gateway reachability from ariane off the home network** is still unproven. It answers at 4 ms from the office, but `gateway.lan.kmello.dev` resolves through pfsense to `10.11.12.105`, and it is unconfirmed whether that is a tailnet subnet route or plain LAN. Test from a phone hotspot; if it fails, add `services.tailscale.enable = true` to `hosts/sync-hub.nix`.
 - **`services.atuin.openRegistration`** must be flipped to `false` after both clients register (Task 10, Step 5).
 - **Shadow-cache pruning** — `~/.cache/wip` grows by one bare repo per repo touched. Bounded by snapshot trees only, no history, so it is small; add a prune to the tick script if it becomes a problem.
+- **`~/.config` reconciliation is deferred** by decision (34 entries on artemis
+  vs 12 on ariane). Portable candidates worth a later look: `glow`, `lazygit`,
+  `lazydocker`, `k9s`, `helm`, `glab-cli`, `jrnl`, `jiratui`, `bkt`, `carapace`,
+  `devenv`, `croc`, `doom`/`emacs`. ariane-only: `rclone`, `lvim`, `jgit`.
+- **`claude` on ariane is a native self-updating build, not the Nix package.**
+  `~/.local/bin/claude` (PATH position 9) shadows `~/.nix-profile/bin/claude`
+  (position 10). Both are 2.1.220 today, but the native one updates itself and
+  will drift, which bypasses the `sadjow/claude-code-nix` + Cachix machinery
+  documented in CLAUDE.md. Decide which should own `claude` — this plan does not
+  touch it.
+- **Homebrew was surveyed and left alone** — see Task 14's preamble. Nix already
+  wins PATH, and the apparent duplicates are not duplicates.
 - **artemis's 37 repos vs ariane's 22.** `wip clone` surfaces the gap, but cloning all of them onto a work laptop is probably not wanted. Expect to clone selectively.
