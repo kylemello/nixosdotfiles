@@ -310,6 +310,12 @@ Create `hosts/sync-hub.nix`:
   systemd.tmpfiles.rules = [
     "d /home/kyle/wip 0700 kyle users -"
     "d /home/kyle/wip/_manifest 0700 kyle users -"
+    # The Syncthing folder paths below. Home Manager creates these on the
+    # clients (home/folders.nix, Task 9) and gateway does import
+    # users/kyle/home.nix, but that lands in a later task — declaring them here
+    # means Syncthing never starts against a missing path.
+    "d /home/kyle/notes 0755 kyle users -"
+    "d /home/kyle/scratch 0755 kyle users -"
   ];
 
   # --- Atuin: shell history server ------------------------------------------
@@ -324,6 +330,10 @@ Create `hosts/sync-hub.nix`:
     openFirewall = true;
   };
 
+  # GUI port. openDefaultPorts does not cover it (see the comment on
+  # guiPasswordFile below), so it is opened explicitly.
+  networking.firewall.allowedTCPPorts = [ 8384 ];
+
   # --- Syncthing: loose files ------------------------------------------------
   # Scope is deliberately small: ~/notes and ~/scratch only. Repos go through
   # `wip`, config goes through the flake.
@@ -335,6 +345,17 @@ Create `hosts/sync-hub.nix`:
     configDir = "/home/kyle/.config/syncthing";
     guiAddress = "0.0.0.0:8384";
     openDefaultPorts = true;
+
+    # openDefaultPorts covers ONLY 22000/tcp+udp and 21027/udp — it does not
+    # open the GUI port, so binding 0.0.0.0 above achieves nothing without this.
+    # And because gateway has a second human user (seth, SSH shell, no sudo),
+    # a non-loopback GUI bind must be authenticated: nixpkgs has no assertion
+    # forcing that, so an unauthenticated control plane would otherwise be
+    # reachable by him over loopback and by anyone on the LAN/Teleport once the
+    # port is open. Create the password file on gateway, root-owned, NOT in git:
+    #   sudo install -Dm400 /dev/stdin /var/lib/syncthing/gui-password
+    guiPasswordFile = "/var/lib/syncthing/gui-password";
+    settings.gui.user = "kyle";
 
     settings = {
       options.urAccepted = -1; # decline usage reporting
@@ -389,6 +410,16 @@ ssh gateway "bash -lc 'sudo nixos-rebuild switch --flake /home/kyle/nixosdotfile
 ssh gateway "bash -lc 'systemctl is-active atuin syncthing; ls -ld /home/kyle/wip'"
 ```
 Expected: `active`, `active`, and `drwx------ ... /home/kyle/wip`.
+
+- [ ] **Step 4b: Create the GUI password file (one-time, on gateway)**
+
+`guiPasswordFile` must exist before Syncthing starts or the service cannot read
+it. It is root-owned and never enters git:
+
+```bash
+ssh gateway "bash -lc 'sudo install -Dm400 /dev/stdin /var/lib/syncthing/gui-password'"
+# type the password, then Ctrl-D
+```
 
 - [ ] **Step 5: Confirm the ports answer**
 
