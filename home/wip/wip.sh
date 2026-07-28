@@ -88,19 +88,56 @@ wip_ensure_bare() {
 # written, and commits it PARENTLESS so no history is transferred and the
 # shadow cache stays tiny. The base commit and branch go in the message
 # instead. Pushes by URL so .git/config is never modified.
+#
+# Every step between building the temp index and computing its tree is
+# checked explicitly. `GIT_INDEX_FILE=<unusable-path> git write-tree` does
+# NOT itself fail the way `read-tree`/`add -A` do -- it can silently return
+# git's canonical empty-tree hash. Left unchecked (as this function used to
+# be), a broken mktemp/read-tree/add step looks identical to "the repo really
+# is empty" and force-pushes an empty tree over a good snapshot -- or worse:
+# an empty $tree from a swallowed failure turns "$sha:refs/heads/wip/$WIP_HOST"
+# into a delete refspec, erasing the hub snapshot outright. On any failure
+# below we bail out non-zero, without touching the marker (so the next tick
+# retries) and without pushing (so the hub keeps whatever snapshot it had).
 wip_snapshot() {
-  local repo="$1" head slug idx tree branch sha target marker
+  local repo="$1" head slug idx tree branch sha target marker empty_tree
   head="$(git -C "$repo" rev-parse --verify --quiet HEAD)" || return 0
   slug="$(wip_slug "$repo")"
   target="$(wip_push_target "$slug")"
   marker="$WIP_STATE/$slug.tree"
   mkdir -p "$WIP_STATE"
 
-  idx="$(mktemp "${TMPDIR:-/tmp}/wip-idx.XXXXXX")"
-  GIT_INDEX_FILE="$idx" git -C "$repo" read-tree "$head"
-  GIT_INDEX_FILE="$idx" git -C "$repo" add -A
-  tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree)"
+  if ! idx="$(mktemp "${TMPDIR:-/tmp}/wip-idx.XXXXXX")"; then
+    printf 'wip: %s: mktemp failed, skipping snapshot\n' "$repo" >&2
+    return 1
+  fi
+  if ! GIT_INDEX_FILE="$idx" git -C "$repo" read-tree "$head"; then
+    printf 'wip: %s: read-tree failed, skipping snapshot\n' "$repo" >&2
+    rm -f "$idx"
+    return 1
+  fi
+  if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A; then
+    printf 'wip: %s: add -A failed, skipping snapshot\n' "$repo" >&2
+    rm -f "$idx"
+    return 1
+  fi
+  if ! tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree)"; then
+    printf 'wip: %s: write-tree failed, skipping snapshot\n' "$repo" >&2
+    rm -f "$idx"
+    return 1
+  fi
   rm -f "$idx"
+
+  # Belt-and-braces: an empty tree is only a legitimate result for a
+  # genuinely empty repo. If write-tree produced one anyway while the
+  # working tree actually has tracked or untracked, non-ignored files,
+  # refuse to push -- this is what keeps the bug above fixed even if a
+  # future change to the steps above reintroduces a silent failure.
+  empty_tree="$(git -C "$repo" hash-object -t tree /dev/null)"
+  if [ "$tree" = "$empty_tree" ] && [ -n "$(git -C "$repo" ls-files -co --exclude-standard)" ]; then
+    printf 'wip: %s: computed tree is unexpectedly empty, refusing to push\n' "$repo" >&2
+    return 1
+  fi
 
   # Clean tree: nothing uncommitted to carry. Drop any stale snapshot so the
   # other machine stops being told there is work waiting.
@@ -116,10 +153,16 @@ wip_snapshot() {
   if [ -f "$marker" ] && [ "$(cat "$marker")" = "$tree" ]; then return 0; fi
 
   branch="$(git -C "$repo" branch --show-current)"
-  sha="$(git -C "$repo" commit-tree "$tree" -m \
-    "wip@$WIP_HOST $(date -Iseconds) base=$(git -C "$repo" rev-parse --short "$head") branch=${branch:-DETACHED}")"
+  if ! sha="$(git -C "$repo" commit-tree "$tree" -m \
+    "wip@$WIP_HOST $(date -Iseconds) base=$(git -C "$repo" rev-parse --short "$head") branch=${branch:-DETACHED}")"; then
+    printf 'wip: %s: commit-tree failed, skipping snapshot\n' "$repo" >&2
+    return 1
+  fi
 
   wip_ensure_bare "$slug"
-  git -C "$repo" push --force --quiet "$target" "$sha:refs/heads/wip/$WIP_HOST"
+  if ! git -C "$repo" push --force --quiet "$target" "$sha:refs/heads/wip/$WIP_HOST"; then
+    printf 'wip: %s: push to hub failed, will retry next run\n' "$repo" >&2
+    return 1
+  fi
   printf '%s' "$tree" > "$marker"
 }

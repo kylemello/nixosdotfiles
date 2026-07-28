@@ -13,6 +13,42 @@ ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected [$3] got [$2]"; }
 
+# Spy on every git invocation made by "$@" (typically a single wip_* call) by
+# prepending a logging shim to PATH inside a subshell -- PATH/env changes
+# never leak to the rest of the script. Each invocation's argv is appended as
+# one line to $1; the real git (resolved once, up front) still runs, so
+# behaviour is unaffected. Used where the SHA/ref a function produces cannot
+# distinguish "took the fast path" from "did the work and got the same
+# answer" -- e.g. a parentless commit whose message embeds a 1-second-
+# resolution timestamp can be byte-identical on a retry whether or not a
+# "nothing changed, skip the network" branch actually ran. Checking which
+# git subcommands were (not) invoked observes the branch directly instead.
+#
+# Uses an explicit /tmp-rooted template for its own bookkeeping dir, NOT bare
+# `mktemp -d` -- some callers (see the failure-path test below) deliberately
+# break TMPDIR to make the *subject under test*'s mktemp fail, and spy_git's
+# own setup must not fall over from the same override.
+spy_git() {
+  local logfile="$1"; shift
+  local spydir realgit rc
+  spydir="$(mktemp -d "/tmp/wip-spy.XXXXXXXXXX")" || {
+    printf 'spy_git: mktemp failed, cannot install shim\n' >&2
+    return 1
+  }
+  realgit="$(command -v git)"
+  cat > "$spydir/git" <<SPY
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$logfile"
+exec $realgit "\$@"
+SPY
+  chmod +x "$spydir/git"
+  : > "$logfile"
+  ( PATH="$spydir:$PATH" "$@" )
+  rc=$?
+  rm -rf "$spydir"
+  return "$rc"
+}
+
 setup() {
   SANDBOX="$(mktemp -d)"
   export HOME="$SANDBOX/home"
@@ -87,8 +123,17 @@ check "snapshot: records base commit" \
   "$(git -C "$BARE" log -1 --format=%s "$SNAP" | grep -c "base=$(git -C "$REPO" rev-parse --short HEAD)")" "1"
 
 # --- idempotence and cleanup -------------------------------------------------
-wip_snapshot "$REPO"
+# NOTE: comparing the ref's SHA before/after a second call is NOT a valid way
+# to prove the "tree unchanged, skip the network" branch ran: the commit
+# message embeds `date -Iseconds` (1s resolution) and the commit is
+# parentless, so a second, *unskipped* call within the same wall-clock second
+# reproduces a byte-identical SHA regardless of whether the fast path fired.
+# `git push` (and everything after the marker check) is only reachable past
+# that branch, so its absence is what actually proves the skip happened.
+spy_git "$SANDBOX/calls.log" wip_snapshot "$REPO"
 check "snapshot: unchanged tree is not re-pushed" \
+  "$(grep -wc push "$SANDBOX/calls.log")" "0"
+check "snapshot: unchanged tree ref still matches" \
   "$(git -C "$BARE" rev-parse refs/heads/wip/testhost)" "$SNAP"
 
 git -C "$REPO" checkout -q -- tracked.txt
@@ -96,6 +141,46 @@ rm -f "$REPO/untracked.txt"
 wip_snapshot "$REPO"
 check "snapshot: clean tree deletes the stale snapshot" \
   "$(git -C "$BARE" rev-parse --verify --quiet refs/heads/wip/testhost || echo gone)" "gone"
+teardown
+
+# --- failure path: temp index build must not clobber a good snapshot -------
+# Regression test for: `GIT_INDEX_FILE=<unusable-path> git write-tree` does
+# not itself fail -- it can silently return git's canonical empty-tree hash.
+# Verified directly against real git: pointing TMPDIR at a nonexistent
+# directory makes `mktemp` fail (idx becomes ""), `read-tree`/`add -A` then
+# fail loudly ("unable to write new index file") but `write-tree` with that
+# same empty GIT_INDEX_FILE silently succeeds with the empty-tree hash. An
+# unguarded wip_snapshot would treat that as "the tree changed to empty" and
+# force-push it over whatever good snapshot was already on the hub. Force
+# exactly that failure mode (one of the three named in the finding: mktemp,
+# read-tree, add -A) and confirm the hub ref, the marker, and the real
+# .git/index all survive untouched, and that git push is never reached.
+setup
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+MARKER="$WIP_STATE/$(wip_slug "$REPO").tree"
+
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+GOOD_SNAP="$(git -C "$BARE" rev-parse refs/heads/wip/testhost)"
+GOOD_MARKER="$(cat "$MARKER")"
+GOOD_INDEX="$(cksum < "$REPO/.git/index")"
+
+printf 'dirty again\n' > "$REPO/tracked.txt"   # tree now differs from the marker too
+(
+  export TMPDIR="$SANDBOX/no-such-dir"
+  spy_git "$SANDBOX/calls.log" wip_snapshot "$REPO"
+)
+FAIL_RC=$?
+
+check "snapshot: fails non-zero when the temp index build fails" "$FAIL_RC" "1"
+check "snapshot: hub ref survives a failed run" \
+  "$(git -C "$BARE" rev-parse refs/heads/wip/testhost)" "$GOOD_SNAP"
+check "snapshot: marker untouched after a failed run" \
+  "$(cat "$MARKER")" "$GOOD_MARKER"
+check "snapshot: real .git/index untouched after a failed run" \
+  "$(cksum < "$REPO/.git/index")" "$GOOD_INDEX"
+check "snapshot: never reaches push on a failed run" \
+  "$(grep -wc push "$SANDBOX/calls.log")" "0"
 teardown
 
 # --- discovery ---------------------------------------------------------------
