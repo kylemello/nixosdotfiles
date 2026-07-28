@@ -640,6 +640,25 @@ check "ssh-missing: an unreachable hub still returns non-zero" "$ASLEEP_STATUS" 
 check "ssh-missing: an unreachable hub stays quiet (no diagnostic)" \
   "$(wc -c <"$ASLEEP_ERR" | tr -d ' ')" "0"
 
+# 126, not 127: the binary is PRESENT but cannot be executed. That is the
+# canonical signature of broken WSL binfmt interop -- ssh.exe is right there on
+# home.sessionPath and `command -v` finds it, but exec'ing it yields "Exec
+# format error". Guarding 127 alone let this fall through to `return 126`,
+# which wip_cmd_push's `wip_hub_up || return 0` turned back into a silent exit
+# 0: the same silent timer, reached by a different code. The guard is an
+# allow-list of 0/255 precisely so no third code can repeat the trick.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX/ssh-noexec"
+chmod 644 "$SANDBOX/ssh-noexec"
+NOEXEC_ERR="$SANDBOX/noexec.err"
+( export WIP_SSH="$SANDBOX/ssh-noexec"; wip_hub_up ) 2>"$NOEXEC_ERR"
+NOEXEC_STATUS=$?
+check "ssh-noexec: a present-but-unexecutable ssh aborts with 126, not a silent 0" \
+  "$NOEXEC_STATUS" "126"
+check "ssh-noexec: it says so on stderr instead of passing for a sleeping hub" \
+  "$(grep -c '^wip: ' "$NOEXEC_ERR")" "2"
+check "ssh-noexec: the diagnostic reports the status it actually got" \
+  "$(grep -c 'exited 126' "$NOEXEC_ERR")" "1"
+
 # End to end through the dispatcher, run exactly as the generated binary runs it
 # (`set -euo pipefail`, both files sourced, argv on the source line) and exactly
 # as the timer invokes it. Asserting on wip_hub_up alone would not have caught

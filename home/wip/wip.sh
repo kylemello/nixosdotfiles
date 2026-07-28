@@ -74,7 +74,7 @@ wip_hub_up() {
   "$ssh" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
       "$WIP_REMOTE_HOST" true 2>/dev/null || status=$?
 
-  # A sleeping hub and an unresolvable ssh binary MUST NOT look alike.
+  # A sleeping hub and a broken local ssh MUST NOT look alike.
   #
   # The probe above sends its stderr to /dev/null, because a LAN-only hub being
   # away is the normal case and must stay quiet. That redirection also swallows
@@ -85,18 +85,35 @@ wip_hub_up() {
   # testing too: `ssh.exe` resolves in an interactive fish (home.sessionPath)
   # but not in a systemd user unit, which is where the timer runs.
   #
+  # The test is an ALLOW-LIST, deliberately, not a list of bad statuses. The
+  # probe runs `true`, so the only two statuses a healthy setup can produce are
+  # 0 (hub answered) and 255 (OpenSSH's reserved code for its own failures:
+  # cannot resolve, cannot connect, connection refused -- i.e. the hub is away).
+  # Everything else came from this end. Enumerating the bad codes gets it the
+  # wrong way round: any code left off the list falls through to
+  # `return "$status"`, and main.sh's `wip_hub_up || return 0` launders that
+  # straight back into a silent exit 0. That is how 126 -- the status for a
+  # binary that EXISTS but cannot be executed, which is exactly what broken WSL
+  # binfmt interop does to ssh.exe ("Exec format error") -- would have walked
+  # back in through a different door after 127 was closed.
+  case "$status" in
+    0|255) return "$status" ;;
+  esac
+
   # 127 is the shell's command-not-found status, but ssh also exits 127 when the
   # REMOTE command does, so confirm with `command -v` before blaming the config.
   if [ "$status" -eq 127 ] && ! command -v "$ssh" >/dev/null 2>&1; then
     printf 'wip: WIP_SSH=%s: no such command on PATH\n' "$ssh" >&2
-    printf 'wip: that is a misconfiguration, not a sleeping hub — aborting.\n' >&2
-    # `exit`, not `return`: every caller treats a non-zero wip_hub_up as "hub
-    # away, retry next tick" and deliberately swallows it, so a return value
-    # would be laundered straight back into the silence this exists to prevent.
-    # No operation in this run can succeed without a working ssh.
-    exit 127
+  else
+    printf 'wip: WIP_SSH=%s: probing %s exited %s (expected 0, or 255 if the hub is away)\n' \
+      "$ssh" "$WIP_REMOTE_HOST" "$status" >&2
   fi
-  return "$status"
+  printf 'wip: that is a misconfiguration, not a sleeping hub — aborting.\n' >&2
+  # `exit`, not `return`: every caller treats a non-zero wip_hub_up as "hub
+  # away, retry next tick" and deliberately swallows it, so a return value
+  # would be laundered straight back into the silence this exists to prevent.
+  # No operation in this run can succeed without a working ssh.
+  exit "$status"
 }
 
 wip_push_target() {
