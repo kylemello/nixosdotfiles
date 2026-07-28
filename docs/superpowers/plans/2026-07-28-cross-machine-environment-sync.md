@@ -352,8 +352,13 @@ Create `hosts/sync-hub.nix`:
     # a non-loopback GUI bind must be authenticated: nixpkgs has no assertion
     # forcing that, so an unauthenticated control plane would otherwise be
     # reachable by him over loopback and by anyone on the LAN/Teleport once the
-    # port is open. Create the password file on gateway, root-owned, NOT in git:
-    #   sudo install -Dm400 /dev/stdin /var/lib/syncthing/gui-password
+    # port is open. Create the password file on gateway, NOT in git. It must be
+    # owned by the syncthing user (kyle) -- syncthing-init runs as that user, and
+    # a root-owned 0400 file makes merge-syncthing-config fail with
+    # "Permission denied" and silently leave no <password> element at all:
+    #   head -c 18 /dev/urandom | base64 | sudo tee /var/lib/syncthing/gui-password >/dev/null
+    #   sudo chown kyle:users /var/lib/syncthing/gui-password
+    #   sudo chmod 400 /var/lib/syncthing/gui-password
     guiPasswordFile = "/var/lib/syncthing/gui-password";
     settings.gui.user = "kyle";
 
@@ -413,13 +418,28 @@ Expected: `active`, `active`, and `drwx------ ... /home/kyle/wip`.
 
 - [ ] **Step 4b: Create the GUI password file (one-time, on gateway)**
 
-`guiPasswordFile` must exist before Syncthing starts or the service cannot read
-it. It is root-owned and never enters git:
+`guiPasswordFile` must exist and be **readable by the syncthing user (`kyle`)** --
+`syncthing-init` runs as that user, so a root-owned file fails with "Permission
+denied" and leaves no `<password>` element, locking the GUI against everyone.
+Generate rather than type it: an interactive `install -Dm400 /dev/stdin` produced a
+0-byte file twice in practice, and 0 bytes fails the same silent way.
 
 ```bash
-ssh gateway "bash -lc 'sudo install -Dm400 /dev/stdin /var/lib/syncthing/gui-password'"
-# type the password, then Ctrl-D
+ssh -t gateway 'head -c 18 /dev/urandom | base64 | sudo tee /var/lib/syncthing/gui-password >/dev/null \
+  && sudo chown kyle:users /var/lib/syncthing/gui-password \
+  && sudo chmod 400 /var/lib/syncthing/gui-password \
+  && sudo stat -c "%s bytes, owner %U" /var/lib/syncthing/gui-password \
+  && sudo systemctl restart syncthing-init'
 ```
+
+Then read it once to store in a password manager: `ssh gateway 'sudo cat /var/lib/syncthing/gui-password'`.
+
+Confirm it actually applied -- the file existing is not proof:
+```bash
+ssh gateway "bash -lc 'journalctl -u syncthing-init -n 5 --no-pager'"   # no "Permission denied"
+```
+A full rebuild is not required; `syncthing-init.service` runs
+`merge-syncthing-config` and re-applies on restart.
 
 - [ ] **Step 5: Confirm the ports answer**
 
