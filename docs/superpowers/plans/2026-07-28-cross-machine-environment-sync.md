@@ -1,0 +1,1784 @@
+# Cross-Machine Environment Sync Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make artemis (NixOS on WSL) and ariane (macOS) feel like one environment — uncommitted work, loose files, Claude config, and shell history all follow you — with gateway as an always-on hub.
+
+**Architecture:** Five independent layers over one hub. Nix already handles config. A `wip` shell tool snapshots dirty working trees to bare repos on gateway without modifying the source repo. Syncthing carries loose files. Atuin carries shell history behind the existing fzf interface. Claude config becomes live symlinks out of the flake.
+
+**Tech Stack:** Nix flakes, Home Manager (NixOS module + standalone darwin), NixOS modules, bash, fish, git plumbing (`commit-tree`, `write-tree`, `read-tree`), Syncthing, Atuin.
+
+**Spec:** `docs/superpowers/specs/2026-07-28-cross-machine-environment-sync-design.md`
+
+## Global Constraints
+
+- **Never modify the user's git repos.** No added remotes, no added refs, no touched HEAD/index/worktree. This is the hard requirement the whole `wip` design exists to satisfy. Task 3's test suite enforces it.
+- **Run the `wip` tests under `nix shell nixpkgs#coreutils nixpkgs#git -c ...`**, never bare. `wip.sh` uses `date -Iseconds`, unsupported by BSD date on ariane.
+- **No test/lint suite exists in this repo.** Verification for Nix changes is `nix eval` of a derivation path. `wip` gets a real bash test suite because it is real code.
+- **`writeShellScriptBin`, never `writeShellApplication`** — the latter pulls in shellcheck, a heavy often-uncached Haskell build. Set `PATH` and `set -euo pipefail` manually.
+- **Flakes only see git-tracked files.** `git add` every new file before running `nix eval`, or it will not be found.
+- **`homeConfigurations` lives under `legacyPackages.<system>`**, not at the flake root. Verification commands must use the full path.
+- **Host identity is baked at build time**, never read from `hostname`. ariane's real hostname is `kyles-macbook-pro`.
+- **Slugs derive from the normalized `origin` URL**, never the directory name. The same project has different directory names on each machine (`DocResolve-brrit-com` vs `DocResolve-brrit.com`, `Census.Navigator.Mobile` vs `CensusNavigator`).
+- **artemis login shell is fish.** Any `ssh artemis '<command>'` in testing must use `ssh artemis "bash -lc '...'"`.
+- **`nixpkgs` is unstable, `allowUnfree` is on.**
+
+### Verification commands
+
+```bash
+# NixOS host (gateway, artemis)
+nix eval .#nixosConfigurations.gateway.config.system.build.toplevel.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+
+# Standalone Home Manager (ariane, aarch64-darwin)
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+```
+
+### Verified environment facts
+
+Confirmed on 2026-07-28; do not re-derive.
+
+| Fact | Value |
+|---|---|
+| NixOS `services.atuin` options | `database` `enable` `environmentFile` `host` `maxHistoryLength` `openFirewall` `openRegistration` `package` `path` `port` |
+| NixOS `services.syncthing` | exists |
+| HM `services.syncthing` on darwin | supported — module has both `systemd.user.services` and `launchd.agents` branches; only `.tray` is Linux-only |
+| HM `services.syncthing` options | `allProxy` `cert` `enable` `extraOptions` `guiAddress` `guiCredentials` `key` `overrideDevices` `overrideFolders` `package` `passwordFile` `settings` `tray` |
+| HM `programs.atuin` | exists; `flags` = "Flags to append to the shell hook" |
+| HM `launchd.agents.<name>.config` | raw launchd plist keys (`ProgramArguments`, `StartInterval`, …) |
+| HM `config.lib.file.mkOutOfStoreSymlink` | exists |
+| `atuin` version | 18.17.1 |
+| `atuin init fish` flags | `--disable-ctrl-r` `--disable-up-arrow` `--disable-ai` |
+| `atuin search` flags | `--print0` `--format` `--limit` `--reverse` `--filter-mode` `--cwd`; dedups unless `--include-duplicates` |
+| gateway capacity | 62 G disk / 31 G free, 11 G RAM, ports 8384 / 8888 / 22000 free |
+| artemis repos | 37 under `~/work` + `~/personal` (4.9 G + 3.1 G) |
+| ariane repos | 22 under `~/work` + `~/personal` (17 G + 3.2 G) |
+| `~/work/work-knowledge-repo` (artemis) | git repo, symlink → `/mnt/c/Users/kylem/Vaults/…` on 9p. Must be excluded. |
+| artemis Windows symlinks | `~/.aws` `~/.azure` `~/.docker/contexts` `~/.docker/features.json` → `/mnt/c/Users/kylem/…` |
+
+---
+
+## File Structure
+
+**New**
+
+| Path | Responsibility |
+|---|---|
+| `hosts/sync-hub.nix` | gateway-only: atuin server, syncthing server, `/home/kyle/wip` storage |
+| `home/wip.nix` | `kyle.wip` options; packages the `wip` script; timer; fish hook |
+| `home/wip/wip.sh` | The `wip` implementation (sourced into `writeShellScriptBin`) |
+| `home/atuin.nix` | Atuin client + `_fzf_atuin_history` + `Ctrl+R` binding |
+| `home/claude.nix` | `mkOutOfStoreSymlink`s for `~/.claude/*` |
+| `home/sync.nix` | Syncthing client for `~/notes`, `~/scratch` |
+| `home/drift.nix` | Flake-staleness warning at shell start |
+| `claude/` | `CLAUDE.md`, `skills/`, `agents/`, `commands/` |
+| `tests/wip.test.sh` | Bash test suite for the `wip` snapshot core |
+
+**Modified**
+
+| Path | Change |
+|---|---|
+| `machines/gateway/configuration.nix` | Import `sync-hub`; CI hardening |
+| `home/folders.nix` | Canonical layout; artemis-only Windows links |
+| `home/wsl.nix` | `kyle.wip.host = "artemis"` |
+| `home/darwin.nix` | `kyle.wip.host = "ariane"` |
+| `home/fish.nix` | Binding order for Atuin under vi mode |
+| `users/kyle/home.nix` | Import new modules |
+| `users/kyle/ariane.nix` | Import new modules |
+
+---
+
+# Phase 1 — Gateway hub
+
+Everything else depends on this. Phase 1 is a safe stopping point: it produces a working hub with nothing pointed at it yet.
+
+## Task 1: Harden gateway CI so `/home` is unreachable
+
+**Files:**
+- Modify: `machines/gateway/configuration.nix:80-82` (tmpfiles rule), `:104-122` (runner block), `:67-75` (ci user)
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: `/home/kyle` is safe for `wip` storage in Task 2
+
+**Why:** The runner currently sets `serviceOverrides.ProtectHome = false` so its workDir under `/home/ci` is reachable. The in-file comment already flags that this exposes `/home/kyle` and `/home/seth`. Task 2 puts snapshots under `/home/kyle`, so this must land first. The fix returns the runner to the NixOS module's default rather than inventing a new configuration.
+
+- [ ] **Step 1: Move the runner workspace out of `/home`**
+
+In `machines/gateway/configuration.nix`, replace the tmpfiles rule:
+
+```nix
+  # Runner workspace outside /home so ProtectHome can stay on. setgid (2770)
+  # so files the runner creates are group-owned by `ci`, letting seth read and
+  # write build artifacts. The runner wipes this dir's *contents* on start.
+  systemd.tmpfiles.rules = [
+    "d /var/lib/ci-runner/work 2770 ci ci -"
+  ];
+```
+
+- [ ] **Step 2: Point the runner at it and drop the ProtectHome override**
+
+Replace `workDir` and delete the `serviceOverrides` line and its comment block:
+
+```nix
+    workDir = "/var/lib/ci-runner/work";
+    extraLabels = [ "gateway" "nixos" ];
+    extraPackages = with pkgs; [ git docker ];
+
+    # ProtectHome is left at the module default (true), so CI jobs cannot read
+    # /home/kyle or /home/seth. The workspace lives under /var/lib, which
+    # ProtectHome does not mask. Seth still reaches it via the `ci` group.
+  };
+```
+
+- [ ] **Step 3: Drop the now-unneeded homeMode override**
+
+`users.users.ci.homeMode = "0750"` existed only to let the `ci` group traverse into `/home/ci`. The workspace no longer lives there. Remove the line and its comment, leaving:
+
+```nix
+  users.groups.ci = {};
+  users.users.ci = {
+    isNormalUser = true;
+    description = "CI runner service account";
+    shell = pkgs.bash;
+    group = "ci";
+    extraGroups = [ "docker" ];
+  };
+```
+
+- [ ] **Step 4: Verify it evaluates**
+
+```bash
+nix eval .#nixosConfigurations.gateway.config.system.build.toplevel.drvPath
+```
+Expected: a `/nix/store/...drv` path, no errors.
+
+- [ ] **Step 5: Assert ProtectHome is actually on**
+
+```bash
+nix eval --raw \
+  .#nixosConfigurations.gateway.config.systemd.services.github-runner-gateway.serviceConfig.ProtectHome
+```
+Expected: `true`. If this prints `false`, Step 2 did not remove the override.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add machines/gateway/configuration.nix
+git commit -m "gateway: keep ProtectHome on, move CI workspace to /var/lib
+
+The runner's workDir lived under /home/ci, which required
+serviceOverrides.ProtectHome = false and exposed /home/kyle and
+/home/seth to CI jobs. Move the workspace to /var/lib/ci-runner/work so
+the module default (ProtectHome = true) applies. Seth keeps access via
+the setgid ci group, which ProtectHome does not affect."
+```
+
+---
+
+## Task 2: Stand up the hub services on gateway
+
+**Files:**
+- Create: `hosts/sync-hub.nix`
+- Modify: `machines/gateway/configuration.nix` (imports)
+
+**Interfaces:**
+- Consumes: Task 1's hardened `/home`
+- Produces: `/home/kyle/wip` (0700) for Task 4's bare repos; Atuin server on `:8888`; Syncthing on `:8384`/`:22000` for Task 12
+
+- [ ] **Step 1: Write the hub module**
+
+Create `hosts/sync-hub.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+# Always-on sync hub. Imported only by gateway. Both endpoints (artemis,
+# ariane) talk to this box rather than to each other, so neither has to be
+# awake for the other to catch up.
+{
+  # --- wip snapshot storage --------------------------------------------------
+  # Bare repos created on demand by the `wip` script over SSH (home/wip.nix).
+  # 0700 under kyle's home: unreadable by seth (no sudo) and by CI jobs
+  # (ProtectHome masks /home entirely — see machines/gateway/configuration.nix).
+  systemd.tmpfiles.rules = [
+    "d /home/kyle/wip 0700 kyle users -"
+    "d /home/kyle/wip/_manifest 0700 kyle users -"
+  ];
+
+  # --- Atuin: shell history server ------------------------------------------
+  # Clients point here instead of api.atuin.sh (home/atuin.nix).
+  services.atuin = {
+    enable = true;
+    host = "0.0.0.0";
+    port = 8888;
+    # Registration is opened for the initial `atuin register` on each machine,
+    # then should be flipped to false and rebuilt. Two clients, one user.
+    openRegistration = true;
+    openFirewall = true;
+  };
+
+  # --- Syncthing: loose files ------------------------------------------------
+  # Scope is deliberately small: ~/notes and ~/scratch only. Repos go through
+  # `wip`, config goes through the flake.
+  services.syncthing = {
+    enable = true;
+    user = "kyle";
+    group = "users";
+    dataDir = "/home/kyle";
+    configDir = "/home/kyle/.config/syncthing";
+    guiAddress = "0.0.0.0:8384";
+    openDefaultPorts = true;
+
+    settings = {
+      options.urAccepted = -1; # decline usage reporting
+
+      folders = {
+        "notes" = {
+          path = "/home/kyle/notes";
+          devices = [ "artemis" "ariane" ];
+          versioning = {
+            type = "staggered";
+            params.maxAge = "2592000"; # 30 days, in seconds
+          };
+        };
+        "scratch" = {
+          path = "/home/kyle/scratch";
+          devices = [ "artemis" "ariane" ];
+          versioning = {
+            type = "staggered";
+            params.maxAge = "604800"; # 7 days
+          };
+        };
+      };
+    };
+  };
+}
+```
+
+- [ ] **Step 2: Import it into gateway**
+
+In `machines/gateway/configuration.nix`, extend the imports list:
+
+```nix
+  imports = [
+    ./hardware-configuration.nix
+    ../../hosts/common.nix
+    ../../hosts/sync-hub.nix
+  ];
+```
+
+- [ ] **Step 3: Track the new file and verify**
+
+```bash
+git add hosts/sync-hub.nix
+nix eval .#nixosConfigurations.gateway.config.system.build.toplevel.drvPath
+```
+Expected: a store path. A `device ... not found` error here means the Syncthing device IDs are not yet declared — that is expected and resolved in Task 12. If it blocks, temporarily comment out the `devices` lines and restore them in Task 12.
+
+- [ ] **Step 4: Deploy and confirm the services are live**
+
+```bash
+ssh gateway "bash -lc 'sudo nixos-rebuild switch --flake /home/kyle/nixosdotfiles#gateway'"
+ssh gateway "bash -lc 'systemctl is-active atuin syncthing; ls -ld /home/kyle/wip'"
+```
+Expected: `active`, `active`, and `drwx------ ... /home/kyle/wip`.
+
+- [ ] **Step 5: Confirm the ports answer**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://gateway:8888/
+curl -s -o /dev/null -w '%{http_code}\n' http://gateway:8384/
+```
+Expected: an HTTP status from each (any 2xx/3xx/4xx proves the listener is up; connection refused means it is not).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add hosts/sync-hub.nix machines/gateway/configuration.nix
+git commit -m "gateway: add sync hub (atuin server, syncthing, wip storage)"
+```
+
+---
+
+# Phase 2 — `wip`
+
+The substantial layer. Task 3 builds and tests the core in isolation with no Nix and no gateway involved, so the hard guarantee ("never modifies your repo") is proven before anything is wired up.
+
+## Task 3: Snapshot core, with tests proving repos stay untouched
+
+**Files:**
+- Create: `home/wip/wip.sh`
+- Create: `tests/wip.test.sh`
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: shell functions `wip_slug <repo>`, `wip_repos`, `wip_snapshot <repo>`, and the env contract `WIP_HOST`, `WIP_REMOTE_HOST`, `WIP_REMOTE_PATH`, `WIP_ROOTS`, `WIP_CACHE`, `WIP_STATE`. Tasks 4–8 build on these exact names.
+
+- [ ] **Step 1: Write the failing test suite**
+
+Create `tests/wip.test.sh`. It runs against temp directories and a local bare repo — no gateway, no network.
+
+```bash
+#!/usr/bin/env bash
+# Test suite for the wip snapshot core.
+#   nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
+# Run it under nix shell, not bare: wip.sh calls `date -Iseconds`, which BSD
+# date (macOS) does not support. The generated `wip` binary gets GNU coreutils
+# from its Nix PATH; a bare `bash tests/wip.test.sh` on ariane would not.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PASS=0; FAIL=0
+
+ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
+check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected [$3] got [$2]"; }
+
+setup() {
+  SANDBOX="$(mktemp -d)"
+  export HOME="$SANDBOX/home"
+  export WIP_HOST="testhost"
+  export WIP_REMOTE_HOST="unused"
+  export WIP_LOCAL_HUB=1
+  export WIP_REMOTE_PATH="$SANDBOX/hub"
+  export WIP_ROOTS="work"
+  export WIP_CACHE="$SANDBOX/cache"
+  export WIP_STATE="$SANDBOX/state"
+  mkdir -p "$HOME/work" "$WIP_REMOTE_PATH" "$WIP_CACHE" "$WIP_STATE"
+
+  REPO="$HOME/work/demo"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q -b main
+  git -C "$REPO" config user.email t@t; git -C "$REPO" config user.name t
+  git -C "$REPO" remote add origin https://github.com/acme/Demo-App.git
+  printf 'node_modules/\n' > "$REPO/.gitignore"
+  printf 'v1\n' > "$REPO/tracked.txt"
+  git -C "$REPO" add -A; git -C "$REPO" commit -qm init
+
+  # Local bare repo standing in for gateway.
+  git init --bare -q "$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+}
+teardown() { rm -rf "$SANDBOX"; }
+
+# shellcheck source=/dev/null
+source "$HERE/../home/wip/wip.sh"
+
+# --- slug --------------------------------------------------------------------
+setup
+check "slug: ssh and https origins agree" \
+  "$(cd "$SANDBOX" && git -C "$REPO" remote set-url origin git@github.com:acme/Demo-App.git; wip_slug "$REPO")" \
+  "github-com-acme-demo-app"
+git -C "$REPO" remote set-url origin https://github.com/acme/Demo-App.git
+check "slug: normalizes case and .git suffix" "$(wip_slug "$REPO")" "github-com-acme-demo-app"
+teardown
+
+# --- the hard guarantee ------------------------------------------------------
+setup
+printf 'dirty\n'      > "$REPO/tracked.txt"
+printf 'new\n'        > "$REPO/untracked.txt"
+mkdir -p "$REPO/node_modules"; printf 'junk\n' > "$REPO/node_modules/x"
+
+BEFORE_REMOTES="$(git -C "$REPO" remote -v)"
+BEFORE_BRANCHES="$(git -C "$REPO" branch -a)"
+BEFORE_ALLREFS="$(git -C "$REPO" for-each-ref)"
+BEFORE_HEAD="$(git -C "$REPO" rev-parse HEAD)"
+BEFORE_STATUS="$(git -C "$REPO" status --porcelain)"
+BEFORE_INDEX="$(cksum < "$REPO/.git/index")"
+
+wip_snapshot "$REPO"
+
+check "repo untouched: remotes"   "$(git -C "$REPO" remote -v)"        "$BEFORE_REMOTES"
+check "repo untouched: branches"  "$(git -C "$REPO" branch -a)"        "$BEFORE_BRANCHES"
+check "repo untouched: all refs"  "$(git -C "$REPO" for-each-ref)"     "$BEFORE_ALLREFS"
+check "repo untouched: HEAD"      "$(git -C "$REPO" rev-parse HEAD)"   "$BEFORE_HEAD"
+check "repo untouched: status"    "$(git -C "$REPO" status --porcelain)" "$BEFORE_STATUS"
+check "repo untouched: index"     "$(cksum < "$REPO/.git/index")"     "$BEFORE_INDEX"
+
+# --- snapshot content --------------------------------------------------------
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+SNAP="$(git -C "$BARE" rev-parse refs/heads/wip/testhost)"
+check "snapshot: is parentless" "$(git -C "$BARE" rev-list --parents -n1 "$SNAP" | wc -w | tr -d ' ')" "1"
+check "snapshot: captures dirty tracked file" \
+  "$(git -C "$BARE" show "$SNAP:tracked.txt")" "dirty"
+check "snapshot: captures untracked file" \
+  "$(git -C "$BARE" show "$SNAP:untracked.txt")" "new"
+check "snapshot: honours .gitignore" \
+  "$(git -C "$BARE" ls-tree -r --name-only "$SNAP" | grep -c node_modules)" "0"
+check "snapshot: records base commit" \
+  "$(git -C "$BARE" log -1 --format=%s "$SNAP" | grep -c "base=$(git -C "$REPO" rev-parse --short HEAD)")" "1"
+
+# --- idempotence and cleanup -------------------------------------------------
+wip_snapshot "$REPO"
+check "snapshot: unchanged tree is not re-pushed" \
+  "$(git -C "$BARE" rev-parse refs/heads/wip/testhost)" "$SNAP"
+
+git -C "$REPO" checkout -q -- tracked.txt
+rm -f "$REPO/untracked.txt"
+wip_snapshot "$REPO"
+check "snapshot: clean tree deletes the stale snapshot" \
+  "$(git -C "$BARE" rev-parse --verify --quiet refs/heads/wip/testhost || echo gone)" "gone"
+teardown
+
+# --- discovery ---------------------------------------------------------------
+setup
+mkdir -p "$HOME/work/plain"                       # not a repo
+ln -s /nonexistent "$HOME/work/dangling-link"     # symlink, must be skipped
+check "discovery: finds repos, skips non-repos and symlinks" \
+  "$(wip_repos | wc -l | tr -d ' ')" "1"
+teardown
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+```bash
+nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
+```
+Expected: FAIL — `home/wip/wip.sh: No such file or directory`.
+
+- [ ] **Step 3: Write the snapshot core**
+
+Create `home/wip/wip.sh`:
+
+```bash
+# wip — cross-machine working-tree snapshots.
+#
+# Sourced by the generated `wip` binary (home/wip.nix) and by the test suite.
+# Defines functions only; no top-level side effects.
+#
+# Environment contract (all set by home/wip.nix, overridden by tests):
+#   WIP_HOST         this machine's logical name ("artemis" / "ariane")
+#   WIP_REMOTE_HOST  ssh host of the hub ("gateway")
+#   WIP_REMOTE_PATH  absolute path on the hub ("/home/kyle/wip")
+#   WIP_ROOTS        space-separated roots under $HOME ("personal work")
+#   WIP_CACHE        shadow repos live here
+#   WIP_STATE        per-repo markers live here
+
+# Normalize a repo to a stable slug. Derived from `origin` rather than the
+# directory name, because the same project has different directory names on
+# each machine (DocResolve-brrit-com vs DocResolve-brrit.com). Falls back to
+# the $HOME-relative path for repos with no origin.
+wip_slug() {
+  local repo="$1" url
+  url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+  if [ -n "$url" ]; then
+    printf '%s' "$url" \
+      | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:#/#; s#\.git$##' \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##'
+  else
+    printf '%s' "${repo#"$HOME"/}" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##'
+  fi
+}
+
+# Print the absolute path of every git repo under the configured roots.
+# `find` does not follow symlinks without -L, so artemis's
+# ~/work/work-knowledge-repo -> /mnt/c/... vault is skipped automatically.
+wip_repos() {
+  local root
+  for root in $WIP_ROOTS; do
+    [ -d "$HOME/$root" ] || continue
+    find "$HOME/$root" -maxdepth 3 -type d -name .git -prune -print 2>/dev/null \
+      | while IFS= read -r g; do dirname "$g"; done
+  done
+}
+
+wip_url()  { printf 'ssh://%s%s/%s.git' "$WIP_REMOTE_HOST" "$WIP_REMOTE_PATH" "$1"; }
+
+# Is the hub a local directory (tests) or a real ssh host (production)?
+#
+# This MUST be an explicit flag, never `[ -d "$WIP_REMOTE_PATH" ]`. artemis's
+# $HOME is /home/kyle and WIP_REMOTE_PATH is /home/kyle/wip, so a directory
+# test would silently make artemis push snapshots to itself instead of
+# gateway — and nothing would ever surface the mistake.
+wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
+
+wip_push_target() {
+  if wip_local_hub; then printf '%s/%s.git' "$WIP_REMOTE_PATH" "$1"
+  else wip_url "$1"; fi
+}
+
+# Create the bare repo on the hub the first time we push to it. Marker file
+# avoids an ssh round-trip on every tick thereafter.
+wip_ensure_bare() {
+  local slug="$1" flag="$WIP_STATE/$1.created"
+  [ -f "$flag" ] && return 0
+  if wip_local_hub; then
+    git init --bare -q "$WIP_REMOTE_PATH/$slug.git" 2>/dev/null || true
+  else
+    ssh "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
+  fi
+  mkdir -p "$WIP_STATE"; : > "$flag"
+}
+
+# Snapshot one repo's working tree to the hub.
+#
+# Builds the tree through a TEMPORARY index so the real .git/index is never
+# written, and commits it PARENTLESS so no history is transferred and the
+# shadow cache stays tiny. The base commit and branch go in the message
+# instead. Pushes by URL so .git/config is never modified.
+wip_snapshot() {
+  local repo="$1" head slug idx tree branch sha target marker
+  head="$(git -C "$repo" rev-parse --verify --quiet HEAD)" || return 0
+  slug="$(wip_slug "$repo")"
+  target="$(wip_push_target "$slug")"
+  marker="$WIP_STATE/$slug.tree"
+  mkdir -p "$WIP_STATE"
+
+  idx="$(mktemp "${TMPDIR:-/tmp}/wip-idx.XXXXXX")"
+  GIT_INDEX_FILE="$idx" git -C "$repo" read-tree "$head"
+  GIT_INDEX_FILE="$idx" git -C "$repo" add -A
+  tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree)"
+  rm -f "$idx"
+
+  # Clean tree: nothing uncommitted to carry. Drop any stale snapshot so the
+  # other machine stops being told there is work waiting.
+  if [ "$tree" = "$(git -C "$repo" rev-parse "$head^{tree}")" ]; then
+    if [ -f "$marker" ]; then
+      git -C "$repo" push --quiet "$target" ":refs/heads/wip/$WIP_HOST" 2>/dev/null || true
+      rm -f "$marker"
+    fi
+    return 0
+  fi
+
+  # Unchanged since the last push: skip the network entirely.
+  if [ -f "$marker" ] && [ "$(cat "$marker")" = "$tree" ]; then return 0; fi
+
+  branch="$(git -C "$repo" branch --show-current)"
+  sha="$(git -C "$repo" commit-tree "$tree" -m \
+    "wip@$WIP_HOST $(date -Iseconds) base=$(git -C "$repo" rev-parse --short "$head") branch=${branch:-DETACHED}")"
+
+  wip_ensure_bare "$slug"
+  git -C "$repo" push --force --quiet "$target" "$sha:refs/heads/wip/$WIP_HOST"
+  printf '%s' "$tree" > "$marker"
+}
+```
+
+- [ ] **Step 4: Run the tests until green**
+
+```bash
+nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
+```
+Expected: `16 passed, 0 failed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add home/wip/wip.sh tests/wip.test.sh
+git commit -m "wip: snapshot core with repo-untouched test suite
+
+Builds the snapshot tree through a temp index and commits it parentless,
+pushing by URL. Tests assert remotes, branches, all refs, HEAD, status
+and the index byte-hash are unchanged after a snapshot, that .gitignore
+is honoured, and that a clean tree deletes any stale snapshot."
+```
+
+---
+
+## Task 4: Manifest and receive side
+
+**Files:**
+- Modify: `home/wip/wip.sh`
+- Modify: `tests/wip.test.sh`
+
+**Interfaces:**
+- Consumes: `wip_slug`, `wip_repos`, `WIP_*` from Task 3
+- Produces: `wip_manifest_write`, `wip_manifest_read <host>`, `wip_fetch <repo>`, `wip_shadow <slug>`, `wip_other_host`. Task 5's CLI verbs call these.
+
+**Manifest format:** one TSV line per repo, `slug \t origin_url \t rel_path \t dirty \t head_sha`, stored at `$WIP_REMOTE_PATH/_manifest/<host>.tsv`. It covers *every* repo, not just dirty ones, because `wip clone` needs the census of clean repos too.
+
+- [ ] **Step 1: Add failing tests for the manifest and shadow fetch**
+
+Append to `tests/wip.test.sh` before the final summary block:
+
+```bash
+# --- manifest ----------------------------------------------------------------
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_manifest_write
+MAN="$WIP_REMOTE_PATH/_manifest/testhost.tsv"
+check "manifest: written" "$([ -f "$MAN" ] && echo yes || echo no)" "yes"
+check "manifest: one line per repo" "$(wc -l < "$MAN" | tr -d ' ')" "1"
+check "manifest: records origin" \
+  "$(cut -f2 "$MAN")" "https://github.com/acme/Demo-App.git"
+check "manifest: records rel path" "$(cut -f3 "$MAN")" "work/demo"
+check "manifest: marks dirty" "$(cut -f4 "$MAN")" "1"
+teardown
+
+# --- shadow fetch ------------------------------------------------------------
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+# Pretend the snapshot came from the other host.
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+
+BEFORE_ALLREFS="$(git -C "$REPO" for-each-ref)"
+wip_fetch "$REPO"
+check "fetch: real repo gains no refs" "$(git -C "$REPO" for-each-ref)" "$BEFORE_ALLREFS"
+check "fetch: shadow holds the snapshot" \
+  "$(git --git-dir="$(wip_shadow "$(wip_slug "$REPO")")" rev-parse --verify --quiet refs/wip/otherhost >/dev/null && echo yes || echo no)" \
+  "yes"
+check "fetch: shadow diffs against the real worktree" \
+  "$(git --git-dir="$(wip_shadow "$(wip_slug "$REPO")")" --work-tree="$REPO" diff --name-only refs/wip/otherhost | wc -l | tr -d ' ')" \
+  "0"
+teardown
+```
+
+- [ ] **Step 2: Run and watch it fail**
+
+```bash
+nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
+```
+Expected: FAIL — `wip_manifest_write: command not found`.
+
+- [ ] **Step 3: Implement the manifest and receive side**
+
+Append to `home/wip/wip.sh`:
+
+```bash
+# The other machine. There are exactly two, so this is unambiguous.
+wip_other_host() {
+  case "$WIP_HOST" in
+    artemis) printf 'ariane'  ;;
+    ariane)  printf 'artemis' ;;
+    *)       printf 'otherhost' ;;   # tests
+  esac
+}
+
+wip_shadow() { printf '%s/%s.git' "$WIP_CACHE" "$1"; }
+
+wip_manifest_path() { printf '%s/_manifest/%s.tsv' "$WIP_REMOTE_PATH" "$1"; }
+
+# Publish this machine's repo census: every repo, dirty or not. `wip clone`
+# reads the other host's census to find repos missing here.
+wip_manifest_write() {
+  local repo slug url rel dirty head out
+  out="$(mktemp "${TMPDIR:-/tmp}/wip-man.XXXXXX")"
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    head="$(git -C "$repo" rev-parse --verify --quiet HEAD)" || continue
+    slug="$(wip_slug "$repo")"
+    url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+    rel="${repo#"$HOME"/}"
+    if [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then dirty=0; else dirty=1; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$url" "$rel" "$dirty" "$head" >> "$out"
+  done < <(wip_repos)
+
+  if wip_local_hub; then
+    mkdir -p "$WIP_REMOTE_PATH/_manifest"
+    mv "$out" "$(wip_manifest_path "$WIP_HOST")"
+  else
+    ssh "$WIP_REMOTE_HOST" "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$(wip_manifest_path "$WIP_HOST")'" < "$out"
+    rm -f "$out"
+  fi
+}
+
+wip_manifest_read() {
+  local host="$1"
+  if wip_local_hub; then
+    cat "$(wip_manifest_path "$host")" 2>/dev/null || true
+  else
+    ssh "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
+  fi
+}
+
+# Pull the other host's snapshot into a shadow repo under $WIP_CACHE. The real
+# repo is never opened for writing, so it gains no refs and no objects.
+wip_fetch() {
+  local repo="$1" slug shadow target
+  slug="$(wip_slug "$repo")"
+  shadow="$(wip_shadow "$slug")"
+  target="$(wip_push_target "$slug")"
+
+  if [ ! -d "$shadow" ]; then
+    mkdir -p "$WIP_CACHE"
+    git init --bare -q "$shadow"
+  fi
+  git --git-dir="$shadow" fetch --quiet --prune --force \
+    "$target" 'refs/heads/wip/*:refs/wip/*' 2>/dev/null || return 0
+}
+```
+
+- [ ] **Step 4: Run the tests until green**
+
+```bash
+nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
+```
+Expected: `24 passed, 0 failed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add home/wip/wip.sh tests/wip.test.sh
+git commit -m "wip: repo manifest and shadow-repo receive side
+
+Snapshots are fetched into ~/.cache/wip/<slug>.git rather than the real
+repo, so no refs land in the user's working repos. The manifest is a
+per-host TSV census of every repo (dirty or not), which `wip clone`
+needs to spot repos that exist on one machine only."
+```
+
+---
+
+## Task 5: CLI verbs
+
+**Files:**
+- Modify: `home/wip/wip.sh`
+- Create: `home/wip/main.sh`
+
+**Interfaces:**
+- Consumes: everything from Tasks 3–4
+- Produces: `wip`, `wip push`, `wip diff`, `wip pull`, `wip clone` — the user-facing surface. Task 7's timer calls `wip push --all`.
+
+Every verb derives its repo from `$PWD`. There is no repo argument and no host argument.
+
+- [ ] **Step 1: Add the repo-from-cwd helper and status query**
+
+Append to `home/wip/wip.sh`:
+
+```bash
+# The repo containing $PWD, or empty if we are not in one.
+wip_cwd_repo() { git rev-parse --show-toplevel 2>/dev/null || true; }
+
+# Age of the other host's snapshot for a repo, in seconds. Empty if none.
+wip_snapshot_age() {
+  local shadow="$1" ref="refs/wip/$(wip_other_host)" ts
+  ts="$(git --git-dir="$shadow" log -1 --format=%ct "$ref" 2>/dev/null)" || return 0
+  [ -n "$ts" ] || return 0
+  printf '%s' "$(( $(date +%s) - ts ))"
+}
+
+wip_human_age() {
+  local s="$1"
+  if   [ "$s" -lt 90 ];    then printf '%d sec' "$s"
+  elif [ "$s" -lt 5400 ];  then printf '%d min' "$(( s / 60 ))"
+  elif [ "$s" -lt 172800 ];then printf '%d hr'  "$(( s / 3600 ))"
+  else                          printf '%d days' "$(( s / 86400 ))"; fi
+}
+
+# One-line summary for the current repo, or empty. Used by both `wip` and the
+# fish cd-hook, so they can never disagree.
+wip_notice() {
+  local repo="$1" slug shadow age stat
+  slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
+  [ -d "$shadow" ] || return 0
+  age="$(wip_snapshot_age "$shadow")"
+  [ -n "$age" ] || return 0
+  stat="$(git --git-dir="$shadow" --work-tree="$repo" diff --shortstat "refs/wip/$(wip_other_host)" 2>/dev/null)"
+  [ -n "$stat" ] || return 0
+  printf '⬇  snapshot from %s · %s ago ·%s · run `wip pull`\n' \
+    "$(wip_other_host)" "$(wip_human_age "$age")" "$stat"
+}
+```
+
+- [ ] **Step 2: Write the dispatcher**
+
+Create `home/wip/main.sh`:
+
+```bash
+# Entry point for the `wip` command. Sourced after wip.sh by the generated
+# binary (home/wip.nix).
+
+wip_cmd_push() {
+  local repo
+  if [ "${1:-}" = "--all" ]; then
+    while IFS= read -r repo; do [ -n "$repo" ] && wip_snapshot "$repo"; done < <(wip_repos)
+    wip_manifest_write
+  else
+    repo="$(wip_cwd_repo)"
+    [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
+    wip_snapshot "$repo"
+  fi
+}
+
+wip_cmd_fetch_all() {
+  local repo
+  while IFS= read -r repo; do [ -n "$repo" ] && wip_fetch "$repo"; done < <(wip_repos)
+}
+
+wip_cmd_diff() {
+  local repo slug shadow
+  repo="$(wip_cwd_repo)"
+  [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
+  slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
+  [ -d "$shadow" ] || { echo "wip: no snapshot for this repo"; return 0; }
+  git --git-dir="$shadow" --work-tree="$repo" diff "refs/wip/$(wip_other_host)"
+}
+
+# Deliberate by design: never overwrite a working tree without consent.
+wip_cmd_pull() {
+  local repo slug shadow force="${1:-}" reply
+  repo="$(wip_cwd_repo)"
+  [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
+  slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
+  git --git-dir="$shadow" rev-parse --verify --quiet "refs/wip/$(wip_other_host)" >/dev/null 2>&1 \
+    || { echo "wip: no snapshot from $(wip_other_host) for this repo"; return 0; }
+
+  if [ -n "$(git -C "$repo" status --porcelain)" ] && [ "$force" != "--force" ]; then
+    echo "wip: your working tree has changes."
+    echo "     Review with \`wip diff\`, then re-run with --force to overwrite."
+    return 1
+  fi
+
+  git --git-dir="$shadow" --work-tree="$repo" diff --stat "refs/wip/$(wip_other_host)"
+  printf 'Apply this snapshot over %s? [y/N] ' "$repo"
+  read -r reply
+  case "$reply" in
+    y|Y) git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- .
+         echo "wip: applied." ;;
+    *)   echo "wip: aborted." ;;
+  esac
+}
+
+# Repos that exist on the other machine but not here.
+wip_missing() {
+  local other slug url rel dirty head
+  other="$(wip_other_host)"
+  while IFS=$'\t' read -r slug url rel dirty head; do
+    [ -n "$slug" ] || continue
+    [ -n "$url" ]  || continue          # no origin: nothing to clone from
+    [ -e "$HOME/$rel" ] && continue
+    printf '%s\t%s\t%s\n' "$slug" "$url" "$rel"
+  done < <(wip_manifest_read "$other")
+}
+
+wip_cmd_clone() {
+  local slug url rel n=0 reply
+  while IFS=$'\t' read -r slug url rel; do
+    [ -n "$rel" ] || continue
+    printf '  %s  ->  ~/%s\n' "$url" "$rel"; n=$((n+1))
+  done < <(wip_missing)
+  [ "$n" -gt 0 ] || { echo "wip: nothing to clone."; return 0; }
+  printf 'Clone %d repo(s)? [y/N] ' "$n"; read -r reply
+  case "$reply" in y|Y) ;; *) echo "wip: aborted."; return 0 ;; esac
+  while IFS=$'\t' read -r slug url rel; do
+    [ -n "$rel" ] || continue
+    mkdir -p "$(dirname "$HOME/$rel")"
+    git clone "$url" "$HOME/$rel" || echo "wip: failed to clone $url" >&2
+  done < <(wip_missing)
+}
+
+# Bare `wip`: in a repo, report on it. Elsewhere, report on everything.
+wip_cmd_status() {
+  local repo n=0 notice slug url rel
+  repo="$(wip_cwd_repo)"
+  if [ -n "$repo" ]; then
+    notice="$(wip_notice "$repo")"
+    if [ -n "$notice" ]; then printf '%s' "$notice"
+    else echo "wip: nothing waiting for this repo."; fi
+    return 0
+  fi
+
+  echo "Snapshots waiting from $(wip_other_host):"
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    notice="$(wip_notice "$repo")"
+    [ -n "$notice" ] || continue
+    printf '  %-40s %s' "${repo#"$HOME"/}" "$notice"; n=$((n+1))
+  done < <(wip_repos)
+  [ "$n" -gt 0 ] || echo "  (none)"
+
+  n=0
+  while IFS=$'\t' read -r slug url rel; do [ -n "$rel" ] && n=$((n+1)); done < <(wip_missing)
+  if [ "$n" -gt 0 ]; then
+    printf '\n%s has %d repo(s) you do not · run `wip clone`\n' "$(wip_other_host)" "$n"
+  fi
+}
+
+case "${1:-status}" in
+  status|"") wip_cmd_status ;;
+  push)      shift; wip_cmd_push "$@" ;;
+  fetch)     wip_cmd_fetch_all ;;
+  diff)      wip_cmd_diff ;;
+  pull)      shift; wip_cmd_pull "$@" ;;
+  clone)     wip_cmd_clone ;;
+  notice)    repo="$(wip_cwd_repo)"; [ -n "$repo" ] && wip_notice "$repo" ;;
+  *)         echo "usage: wip [status|push [--all]|fetch|diff|pull [--force]|clone]" >&2; exit 1 ;;
+esac
+```
+
+- [ ] **Step 3: Smoke-test the dispatcher against the sandbox**
+
+```bash
+bash -c '
+  set -e
+  S=$(mktemp -d); export HOME=$S/home
+  export WIP_HOST=testhost WIP_REMOTE_HOST=unused WIP_REMOTE_PATH=$S/hub WIP_LOCAL_HUB=1
+  export WIP_ROOTS=work WIP_CACHE=$S/cache WIP_STATE=$S/state
+  mkdir -p "$HOME/work" "$WIP_REMOTE_PATH" "$WIP_CACHE" "$WIP_STATE"
+  R=$HOME/work/demo; mkdir -p "$R"
+  git -C "$R" init -q -b main
+  git -C "$R" config user.email t@t; git -C "$R" config user.name t
+  git -C "$R" remote add origin https://github.com/acme/demo.git
+  echo v1 > "$R/a.txt"; git -C "$R" add -A; git -C "$R" commit -qm init
+  echo v2 > "$R/a.txt"
+  source home/wip/wip.sh
+  wip_snapshot "$R"; wip_manifest_write
+  cd "$R"; bash '"$PWD"'/home/wip/main.sh status
+  rm -rf "$S"
+'
+```
+Expected: no snapshot notice (the only snapshot is from `testhost`, i.e. this host, not the other one) and a clean exit. Any `command not found` means a function is missing from `wip.sh`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add home/wip/main.sh home/wip/wip.sh
+git commit -m "wip: CLI verbs derived from cwd
+
+status/push/fetch/diff/pull/clone, all taking their repo from \$PWD.
+pull refuses a dirty tree without --force and always confirms before
+touching the working tree. clone reads the other host's manifest to
+materialize repos that exist on one machine only."
+```
+
+---
+
+## Task 6: Nix module
+
+**Files:**
+- Create: `home/wip.nix`
+- Modify: `home/wsl.nix`, `home/darwin.nix`, `users/kyle/home.nix`, `users/kyle/ariane.nix`
+
+**Interfaces:**
+- Consumes: `home/wip/wip.sh`, `home/wip/main.sh`
+- Produces: option `kyle.wip.{enable,host,roots,remoteHost,remotePath,interval}`; a `wip` binary on `PATH`. Task 7 reads `cfg.interval`, Task 8 reads `cfg.enable`.
+
+- [ ] **Step 1: Write the module**
+
+Create `home/wip.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+let
+  cfg = config.kyle.wip;
+
+  # The script is assembled rather than templated so home/wip/*.sh stay
+  # directly testable (see tests/wip.test.sh).
+  wip = pkgs.writeShellScriptBin "wip" ''
+    set -euo pipefail
+    export PATH="${lib.makeBinPath (with pkgs; [ git openssh coreutils findutils gnused ])}:$PATH"
+
+    export WIP_HOST=${lib.escapeShellArg cfg.host}
+    export WIP_REMOTE_HOST=${lib.escapeShellArg cfg.remoteHost}
+    export WIP_REMOTE_PATH=${lib.escapeShellArg cfg.remotePath}
+    export WIP_ROOTS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.roots)}
+    export WIP_CACHE="''${XDG_CACHE_HOME:-$HOME/.cache}/wip"
+    export WIP_STATE="''${XDG_STATE_HOME:-$HOME/.local/state}/wip"
+
+    source ${./wip/wip.sh}
+    source ${./wip/main.sh}
+  '';
+in
+{
+  options.kyle.wip = {
+    enable = lib.mkEnableOption "cross-machine working-tree snapshots";
+
+    host = lib.mkOption {
+      type = lib.types.str;
+      description = ''
+        This machine's logical name. Baked in at build time rather than read
+        from `hostname` — ariane's real hostname is `kyles-macbook-pro`, which
+        would produce confusing ref names.
+      '';
+      example = "artemis";
+    };
+
+    roots = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "personal" ];
+      description = ''
+        Directories under $HOME to scan for repos. Independently toggleable so
+        the decision about whether work repos reach the homelab is one line.
+      '';
+      example = [ "personal" "work" ];
+    };
+
+    remoteHost = lib.mkOption {
+      type = lib.types.str;
+      default = "gateway";
+      description = "SSH host of the always-on hub.";
+    };
+
+    remotePath = lib.mkOption {
+      type = lib.types.str;
+      default = "/home/kyle/wip";
+      description = "Absolute path on the hub holding the bare snapshot repos.";
+    };
+
+    interval = lib.mkOption {
+      type = lib.types.int;
+      default = 5;
+      description = "Minutes between snapshot/fetch runs.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    home.packages = [ wip ];
+  };
+}
+```
+
+- [ ] **Step 2: Set the host on each platform**
+
+Append to `home/wsl.nix`:
+
+```nix
+  # Logical host name for `wip` refs. See home/wip.nix.
+  kyle.wip.host = "artemis";
+```
+
+Append to `home/darwin.nix`:
+
+```nix
+  # Logical host name for `wip` refs — NOT the machine's real hostname
+  # (kyles-macbook-pro), which would make for confusing ref names.
+  kyle.wip.host = "ariane";
+```
+
+- [ ] **Step 3: Import and enable on both profiles**
+
+In `users/kyle/home.nix` and `users/kyle/ariane.nix`, add to `imports`:
+
+```nix
+    ../../home/wip.nix
+```
+
+and add to each profile body:
+
+```nix
+  kyle.wip = {
+    enable = true;
+    roots = [ "personal" "work" ];
+  };
+```
+
+- [ ] **Step 4: Track the new files and verify both platforms evaluate**
+
+```bash
+git add home/wip.nix home/wip/
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+```
+Expected: two store paths.
+
+- [ ] **Step 5: Confirm the binary bakes in the right host**
+
+```bash
+nix build --no-link --print-out-paths \
+  .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.config.home.path
+grep -m1 WIP_HOST "$(nix eval --raw .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.config.home.path)/bin/wip"
+```
+Expected: `export WIP_HOST='ariane'`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add home/wip.nix home/wip/ home/wsl.nix home/darwin.nix users/kyle/home.nix users/kyle/ariane.nix
+git commit -m "wip: Nix module, enabled on artemis and ariane
+
+Host identity is baked at build time rather than sniffed from hostname."
+```
+
+---
+
+## Task 7: Timer
+
+**Files:**
+- Modify: `home/wip.nix`
+
+**Interfaces:**
+- Consumes: `cfg.interval`, the `wip` binary from Task 6
+- Produces: a recurring `wip push --all && wip fetch` on both platforms
+
+- [ ] **Step 1: Add both platform backends**
+
+In `home/wip.nix`, extend the `config` block. Add to the `let` binding first:
+
+```nix
+  tick = pkgs.writeShellScript "wip-tick" ''
+    set -uo pipefail
+    ${wip}/bin/wip push --all || true
+    ${wip}/bin/wip fetch     || true
+    ${lib.optionalString cfg.driftCheck ''
+      ${pkgs.git}/bin/git -C "$HOME/nixosdotfiles" fetch --quiet || true
+    ''}
+  '';
+```
+
+Add the `driftCheck` option alongside the others:
+
+```nix
+    driftCheck = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Also fetch the flake repo each tick, for home/drift.nix.";
+    };
+```
+
+Then replace the `config` block:
+
+```nix
+  config = lib.mkIf cfg.enable {
+    home.packages = [ wip ];
+
+    # Linux (artemis): systemd user timer.
+    systemd.user = lib.mkIf pkgs.stdenv.isLinux {
+      services.wip = {
+        Unit.Description = "Snapshot dirty working trees to the sync hub";
+        Service = {
+          Type = "oneshot";
+          ExecStart = "${tick}";
+        };
+      };
+      timers.wip = {
+        Unit.Description = "Run wip every ${toString cfg.interval} minutes";
+        Timer = {
+          OnBootSec = "2m";
+          OnUnitActiveSec = "${toString cfg.interval}m";
+          Persistent = true;
+        };
+        Install.WantedBy = [ "timers.target" ];
+      };
+    };
+
+    # macOS (ariane): launchd agent.
+    launchd.agents.wip = lib.mkIf pkgs.stdenv.isDarwin {
+      enable = true;
+      config = {
+        ProgramArguments = [ "${tick}" ];
+        StartInterval = cfg.interval * 60;
+        RunAtLoad = true;
+        ProcessType = "Background";
+        StandardOutPath = "${config.home.homeDirectory}/.local/state/wip/agent.log";
+        StandardErrorPath = "${config.home.homeDirectory}/.local/state/wip/agent.log";
+      };
+    };
+
+    home.activation.wipStateDir =
+      lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        $DRY_RUN_CMD mkdir -p "$HOME/.local/state/wip" "$HOME/.cache/wip"
+      '';
+  };
+```
+
+- [ ] **Step 2: Verify both platforms still evaluate**
+
+```bash
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+```
+Expected: two store paths. A `The option launchd.agents...does not exist` error means the `mkIf isDarwin` was placed outside the attribute rather than on its value.
+
+- [ ] **Step 3: Confirm only the right backend is produced**
+
+```bash
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.config.launchd.agents.wip.enable
+nix eval .#nixosConfigurations.artemis.config.home-manager.users.kyle.systemd.user.timers.wip.Timer.OnUnitActiveSec
+```
+Expected: `true`, then `"5m"`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add home/wip.nix
+git commit -m "wip: 5-minute timer via systemd (linux) and launchd (darwin)"
+```
+
+---
+
+## Task 8: Fish cd-hook
+
+**Files:**
+- Modify: `home/wip.nix`
+
+**Interfaces:**
+- Consumes: `wip notice` from Task 5
+- Produces: a passive notice on entering a repo with a waiting snapshot
+
+**Why a hook rather than a CLI habit:** the user's stated constraint was that they will only remember this exists while inside a repo. The hook removes the need to remember at all. It reads local refs from the shadow cache only — no SSH, sub-millisecond, silent when there is nothing to say.
+
+- [ ] **Step 1: Add the hook**
+
+Add to the `config` block in `home/wip.nix`:
+
+```nix
+    programs.fish.functions.__wip_on_pwd = {
+      description = "Announce a waiting wip snapshot on entering a repo";
+      onVariable = "PWD";
+      body = ''
+        # Local ref reads only — no network. Silent unless there is news.
+        ${wip}/bin/wip notice 2>/dev/null
+      '';
+    };
+```
+
+- [ ] **Step 2: Verify it evaluates and lands in the fish config**
+
+```bash
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval --raw .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.config.programs.fish.functions.__wip_on_pwd.onVariable
+```
+Expected: a store path, then `PWD`.
+
+- [ ] **Step 3: Confirm it is fast enough to run on every `cd`**
+
+After activating on ariane:
+
+```bash
+cd ~/work/docresolve && time wip notice
+```
+Expected: real time under ~50 ms. If it is slower, the shadow cache is missing and `wip_fetch` is being reached — check `~/.cache/wip/` exists.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add home/wip.nix
+git commit -m "wip: fish PWD hook announcing waiting snapshots"
+```
+
+---
+
+# Phase 3 — User environment
+
+Independent of each other. Any subset can land.
+
+## Task 9: Canonical folder layout
+
+**Files:**
+- Modify: `home/folders.nix`, `home/wsl.nix`
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: `~/personal`, `~/work`, `~/notes`, `~/scratch` on both machines — the roots Tasks 6 and 12 scan
+
+- [ ] **Step 1: Replace the folder module**
+
+`home/folders.nix` currently creates `~/personal` and `~/work` and writes a `~/work/.gitconfig`. Extend it, preserving the gitconfig:
+
+```nix
+{ lib, config, pkgs, ... }:
+
+# Canonical layout, identical on every machine. Anything host-specific — in
+# particular artemis's symlinks into the Windows filesystem — lives in
+# home/wsl.nix, so these directories only ever contain real files and the
+# sync layers never have to reason about cross-platform symlinks.
+{
+  home.activation.createDirsAndFiles = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    $DRY_RUN_CMD mkdir -p "$HOME/personal"
+    $DRY_RUN_CMD mkdir -p "$HOME/work"
+    $DRY_RUN_CMD mkdir -p "$HOME/notes"
+    $DRY_RUN_CMD mkdir -p "$HOME/scratch"
+    $DRY_RUN_CMD cat > "$HOME/work/.gitconfig" <<EOF
+    [user]
+      email = kmello@broadriverrehab.com
+    EOF
+  '';
+}
+```
+
+- [ ] **Step 2: Document artemis's Windows-backed paths**
+
+Add to `home/wsl.nix`, recording what was found on the live machine:
+
+```nix
+  # Paths backed by the Windows filesystem. These exist on artemis only; they
+  # cannot cross to macOS, and they must never enter a sync root.
+  #
+  # Already present on disk (created by hand, left as-is):
+  #   ~/.aws                  -> /mnt/c/Users/kylem/.aws
+  #   ~/.azure                -> /mnt/c/Users/kylem/.azure
+  #   ~/.docker/contexts      -> /mnt/c/Users/kylem/.docker/contexts
+  #   ~/.docker/features.json -> /mnt/c/Users/kylem/.docker/features.json
+  #
+  # ~/work/work-knowledge-repo -> /mnt/c/Users/kylem/Vaults/work-knowledge-repo
+  # is a git repo living INSIDE a sync root, on the 9p filesystem. `wip_repos`
+  # uses plain `find` (no -L), which does not traverse symlinks, so it is
+  # skipped. Do not add -L to that find without excluding this path first.
+```
+
+- [ ] **Step 3: Verify**
+
+```bash
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+```
+Expected: two store paths.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add home/folders.nix home/wsl.nix
+git commit -m "home: canonical ~/personal ~/work ~/notes ~/scratch layout
+
+Documents artemis's Windows-backed symlinks, including the
+work-knowledge-repo vault that sits inside a sync root and is skipped
+because wip_repos uses find without -L."
+```
+
+---
+
+## Task 10: Atuin with the fzf front-end
+
+**Files:**
+- Create: `home/atuin.nix`
+- Modify: `home/fish.nix`, `users/kyle/home.nix`, `users/kyle/ariane.nix`
+
+**Interfaces:**
+- Consumes: the Atuin server from Task 2
+- Produces: `Ctrl+R` backed by Atuin, wearing the fzf.fish interface
+
+**Hard requirement:** the interface must not change. Only the data source does. The function below is a clone of upstream `_fzf_search_history` with one line swapped — `_fzf_wrapper`, `--multi`, `--scheme=history`, the `History> ` prompt, the `fish_indent --ansi` preview, the U+2502 separator, and `$fzf_history_opts` are all preserved verbatim.
+
+- [ ] **Step 1: Write the module**
+
+Create `home/atuin.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+{
+  programs.atuin = {
+    enable = true;
+
+    # Atuin's own Ctrl-R and up-arrow bindings are suppressed; the fzf.fish
+    # interface below owns Ctrl-R instead. Verified against atuin 18.17.1:
+    # --disable-ctrl-r, --disable-up-arrow, --disable-ai all exist.
+    flags = [ "--disable-ctrl-r" "--disable-up-arrow" ];
+
+    settings = {
+      # The Home Manager example defaults to "prefix"; do not inherit it.
+      search_mode = "fuzzy";
+      filter_mode = "global";
+      sync_address = "http://gateway:8888";
+      auto_sync = true;
+      sync_frequency = "5m";
+      update_check = false;
+    };
+  };
+
+  # A clone of fzf.fish's _fzf_search_history with the data source swapped from
+  # `builtin history` to `atuin search`. Everything else is upstream's, so the
+  # interface is unchanged. Dropped from upstream: `builtin history merge`,
+  # which has no Atuin equivalent.
+  programs.fish.functions._fzf_atuin_history = {
+    description = "Search Atuin history. Replace the command line with the selected command.";
+    body = ''
+      set -f time_prefix_regex '^.*? │ '
+      set -f commands_selected (
+          atuin search --print0 --limit 10000 --format "{time} │ {command}" |
+          _fzf_wrapper --read0 \
+              --print0 \
+              --multi \
+              --scheme=history \
+              --prompt="History> " \
+              --query=(commandline) \
+              --preview="string replace --regex '$time_prefix_regex' \'\' -- {} | fish_indent --ansi" \
+              --preview-window="bottom:3:wrap" \
+              $fzf_history_opts |
+          string split0 |
+          string replace --regex $time_prefix_regex \'\'
+      )
+
+      if test $status -eq 0
+          commandline --replace -- $commands_selected
+      end
+
+      commandline --function repaint
+    '';
+  };
+}
+```
+
+- [ ] **Step 2: Bind it after vi mode is established**
+
+`home/fish.nix` calls `fish_vi_key_bindings` *after* its `bind` lines. Atuin's init hook and this binding must both land after that call, or the binds will not survive in vi mode. Append to `interactiveShellInit`, at the very end:
+
+```fish
+      # Ctrl-R: fzf.fish's interface over Atuin's cross-machine database.
+      # Must come after fish_vi_key_bindings above. Both modes are needed
+      # because vi mode keeps separate binding tables.
+      bind \cr _fzf_atuin_history
+      bind -M insert \cr _fzf_atuin_history
+```
+
+- [ ] **Step 3: Import on both profiles**
+
+Add `../../home/atuin.nix` to `imports` in `users/kyle/home.nix` and `users/kyle/ariane.nix`.
+
+- [ ] **Step 4: Verify**
+
+```bash
+git add home/atuin.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+```
+Expected: two store paths.
+
+- [ ] **Step 5: Register against the hub (one-time, per machine)**
+
+```bash
+atuin register -u kyle -e kmello@broadriverrehab.com   # first machine only
+atuin login -u kyle                                     # second machine
+atuin import auto && atuin sync
+```
+Then close registration on gateway: set `services.atuin.openRegistration = false;` in `hosts/sync-hub.nix` and rebuild.
+
+- [ ] **Step 6: Resolve the two open format questions against real output**
+
+```bash
+# Is --print0 a record SEPARATOR (needed by fzf --read0) or only a terminator?
+atuin search --print0 --limit 3 --format "{time} │ {command}" | xxd | grep -c '0000'
+# What does {time} actually look like next to fzf.fish's "%m-%d %H:%M:%S"?
+atuin search --limit 3 --format "{time} │ {command}"
+```
+If `--print0` turns out to be terminator-only, replace the pipeline's first stage with
+`atuin search --cmd-only --limit 10000 | string join0` and drop the time column.
+If `{time}` is much wider than `MM-DD HH:MM:SS`, insert a
+`| string replace --regex '^(\S+ \S+)\S*' '$1'` stage before `_fzf_wrapper`.
+
+- [ ] **Step 7: Confirm the interface is unchanged**
+
+Press `Ctrl+R`. Expected: the same `History> ` prompt, the same bottom preview pane, the same `--cycle --layout=reverse --border --height=90%` frame — populated with commands from the other machine. Confirm the other five fzf.fish widgets still work: `Ctrl+T`, `Ctrl+Alt+L`, `Ctrl+Alt+S`, `Ctrl+V`, `Ctrl+Alt+P`.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add home/atuin.nix home/fish.nix users/kyle/home.nix users/kyle/ariane.nix
+git commit -m "atuin: self-hosted history behind the fzf.fish interface
+
+Atuin's own Ctrl-R is disabled and _fzf_search_history is cloned with
+only its data source swapped, so the interface is byte-identical and the
+other five fzf.fish widgets are untouched. search_mode is pinned to
+fuzzy; the HM example defaults to prefix."
+```
+
+---
+
+## Task 11: Claude config as live symlinks
+
+**Files:**
+- Create: `home/claude.nix`, `claude/`
+- Modify: `users/kyle/home.nix`, `users/kyle/ariane.nix`
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: `~/.claude/{CLAUDE.md,skills,agents,commands}` versioned in the flake repo, writable in place
+
+- [ ] **Step 1: Move the current content into the repo**
+
+```bash
+mkdir -p claude
+for p in CLAUDE.md skills agents commands; do
+  [ -e "$HOME/.claude/$p" ] && cp -R "$HOME/.claude/$p" "claude/$p"
+done
+mkdir -p claude/skills claude/agents claude/commands
+touch claude/skills/.keep claude/agents/.keep claude/commands/.keep
+git add claude/
+```
+
+- [ ] **Step 2: Write the module**
+
+Create `home/claude.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+let
+  # Point at the live working copy, not the nix store, so edits take effect
+  # immediately and land in git. mkOutOfStoreSymlink is what makes the target
+  # writable — a plain home.file source would be a read-only store path.
+  repo = "${config.home.homeDirectory}/nixosdotfiles/claude";
+  link = p: config.lib.file.mkOutOfStoreSymlink "${repo}/${p}";
+in
+{
+  # Deliberately NOT managed here:
+  #   settings.json    Claude Code rewrites it itself; fighting for ownership
+  #                    would clobber changes made via /config.
+  #   projects/        session transcripts, machine-specific paths, large
+  #   history.jsonl    append-only from two machines, would conflict
+  #   .credentials.json  secret
+  #   cache/ daemon/ session-env/ shell-snapshots/ telemetry/ file-history/
+  #   backups/         all derived or machine-local
+  home.file = {
+    ".claude/CLAUDE.md".source = link "CLAUDE.md";
+    ".claude/skills".source    = link "skills";
+    ".claude/agents".source    = link "agents";
+    ".claude/commands".source  = link "commands";
+  };
+}
+```
+
+- [ ] **Step 3: Import on both profiles**
+
+Add `../../home/claude.nix` to `imports` in `users/kyle/home.nix` and `users/kyle/ariane.nix`.
+
+- [ ] **Step 4: Verify**
+
+```bash
+git add home/claude.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+```
+Expected: a store path.
+
+- [ ] **Step 5: Confirm the links are writable after activation**
+
+```bash
+home-manager switch --flake .#ariane
+readlink ~/.claude/CLAUDE.md
+echo "# test" >> ~/.claude/CLAUDE.md && git -C ~/nixosdotfiles status --short claude/
+git -C ~/nixosdotfiles checkout -- claude/CLAUDE.md
+```
+Expected: the symlink resolves to `~/nixosdotfiles/claude/CLAUDE.md` (not `/nix/store/...`), the append succeeds, and git reports the file as modified. If the target is a store path, `mkOutOfStoreSymlink` was not used.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add claude/ home/claude.nix users/kyle/home.nix users/kyle/ariane.nix
+git commit -m "claude: version CLAUDE.md/skills/agents/commands in the flake
+
+mkOutOfStoreSymlink keeps them writable and edits land in git. settings.json
+stays unmanaged because Claude Code rewrites it."
+```
+
+---
+
+## Task 12: Syncthing clients for loose files
+
+**Files:**
+- Create: `home/sync.nix`
+- Modify: `hosts/sync-hub.nix`, `users/kyle/home.nix`, `users/kyle/ariane.nix`
+
+**Interfaces:**
+- Consumes: the Syncthing server from Task 2, `~/notes` and `~/scratch` from Task 9
+- Produces: `~/notes` and `~/scratch` replicated through gateway
+
+- [ ] **Step 1: Collect the device IDs**
+
+Syncthing generates a device ID on first run. Start it on each machine, then read the IDs — they are needed on both ends.
+
+```bash
+ssh gateway "bash -lc 'syncthing --device-id --home=/home/kyle/.config/syncthing'"
+ssh artemis "bash -lc 'syncthing --device-id --home=\$HOME/.config/syncthing'"
+syncthing --device-id --home="$HOME/Library/Application Support/Syncthing"
+```
+Record all three. If a command fails because the config does not exist yet, run `syncthing generate --home=<dir>` first.
+
+- [ ] **Step 2: Write the client module**
+
+Create `home/sync.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+let
+  # Device IDs collected in Step 1. Not secret — they are public keys.
+  devices = {
+    gateway = "PASTE-GATEWAY-DEVICE-ID";
+    artemis = "PASTE-ARTEMIS-DEVICE-ID";
+    ariane  = "PASTE-ARIANE-DEVICE-ID";
+  };
+in
+{
+  # Scope is deliberately narrow: loose files only. Repos go through `wip`
+  # (home/wip.nix) and config goes through the flake, so no .git directory
+  # ever enters a Syncthing folder and the lock-file hazard cannot arise.
+  services.syncthing = {
+    enable = true;
+    overrideDevices = true;
+    overrideFolders = true;
+
+    settings = {
+      devices = {
+        gateway.id = devices.gateway;
+        artemis.id = devices.artemis;
+        ariane.id  = devices.ariane;
+      };
+
+      folders = {
+        "notes" = {
+          path = "${config.home.homeDirectory}/notes";
+          devices = [ "gateway" ];   # star topology: everything via the hub
+        };
+        "scratch" = {
+          path = "${config.home.homeDirectory}/scratch";
+          devices = [ "gateway" ];
+        };
+      };
+
+      options.urAccepted = -1;
+    };
+  };
+}
+```
+
+- [ ] **Step 3: Fill the same IDs into the hub**
+
+In `hosts/sync-hub.nix`, add the `devices` block to `services.syncthing.settings` and restore the folder `devices` lists if Task 2 Step 3 required commenting them out:
+
+```nix
+      devices = {
+        artemis.id = "PASTE-ARTEMIS-DEVICE-ID";
+        ariane.id  = "PASTE-ARIANE-DEVICE-ID";
+      };
+```
+
+- [ ] **Step 4: Import on both profiles**
+
+Add `../../home/sync.nix` to `imports` in `users/kyle/home.nix` and `users/kyle/ariane.nix`.
+
+- [ ] **Step 5: Verify**
+
+```bash
+git add home/sync.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.gateway.config.system.build.toplevel.drvPath
+```
+Expected: two store paths.
+
+- [ ] **Step 6: Prove a file crosses**
+
+```bash
+echo "from ariane $(date)" > ~/notes/roundtrip.txt
+sleep 60
+ssh gateway "bash -lc 'cat /home/kyle/notes/roundtrip.txt'"
+ssh artemis "bash -lc 'cat ~/notes/roundtrip.txt'"
+```
+Expected: the same line from both. If gateway has it but artemis does not, artemis's Syncthing has not accepted the folder — check `systemctl --user status syncthing` there.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add home/sync.nix hosts/sync-hub.nix users/kyle/home.nix users/kyle/ariane.nix
+git commit -m "sync: syncthing for ~/notes and ~/scratch via gateway"
+```
+
+---
+
+## Task 13: Config drift alarm
+
+**Files:**
+- Create: `home/drift.nix`
+- Modify: `users/kyle/home.nix`, `users/kyle/ariane.nix`
+
+**Interfaces:**
+- Consumes: the flake fetch performed each tick by Task 7's `tick` script
+- Produces: a shell-start warning when the machine has not rebuilt
+
+- [ ] **Step 1: Write the module**
+
+Create `home/drift.nix`:
+
+```nix
+{ config, lib, pkgs, ... }:
+
+let
+  repo = "${config.home.homeDirectory}/nixosdotfiles";
+  stamp = "${config.home.homeDirectory}/.local/state/wip/last-switch";
+in
+{
+  # Record the flake commit at activation time. The check below compares it
+  # against the repo's current HEAD plus whatever the timer has fetched.
+  home.activation.recordFlakeRev = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    $DRY_RUN_CMD mkdir -p "$(dirname ${stamp})"
+    if [ -d "${repo}/.git" ]; then
+      $DRY_RUN_CMD ${pkgs.git}/bin/git -C "${repo}" rev-parse HEAD > "${stamp}" 2>/dev/null || true
+    fi
+  '';
+
+  # Warn at shell start. Two local reads (a file and a git ref) — no network,
+  # because home/wip.nix's timer already did the fetch.
+  programs.fish.interactiveShellInit = lib.mkAfter ''
+    if test -f ${stamp}; and test -d ${repo}/.git
+        set -l switched (cat ${stamp})
+        set -l current (git -C ${repo} rev-parse HEAD 2>/dev/null)
+        set -l upstream (git -C ${repo} rev-parse '@{u}' 2>/dev/null)
+        if test -n "$current"; and test "$switched" != "$current"
+            set_color yellow
+            echo "⚠  nixosdotfiles moved since your last switch — run ./update.sh"
+            set_color normal
+        else if test -n "$upstream"; and test "$current" != "$upstream"
+            set -l behind (git -C ${repo} rev-list --count HEAD..'@{u}' 2>/dev/null)
+            set_color yellow
+            echo "⚠  nixosdotfiles is $behind commit(s) behind the other machine — git pull && ./update.sh"
+            set_color normal
+        end
+    end
+  '';
+}
+```
+
+- [ ] **Step 2: Import on both profiles**
+
+Add `../../home/drift.nix` to `imports` in `users/kyle/home.nix` and `users/kyle/ariane.nix`.
+
+- [ ] **Step 3: Verify**
+
+```bash
+git add home/drift.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+```
+Expected: two store paths.
+
+- [ ] **Step 4: Prove it fires and then clears**
+
+```bash
+home-manager switch --flake .#ariane
+exec fish -l                                     # expect: no warning
+git -C ~/nixosdotfiles commit --allow-empty -m "drift test"
+exec fish -l                                     # expect: the yellow warning
+git -C ~/nixosdotfiles reset --hard HEAD~1
+exec fish -l                                     # expect: no warning
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add home/drift.nix users/kyle/home.nix users/kyle/ariane.nix
+git commit -m "home: warn at shell start when the flake has moved since switch"
+```
+
+---
+
+# Rollout
+
+Deploy in dependency order. Each is independently revertible with `home-manager switch --rollback` or `nixos-rebuild --rollback`.
+
+```bash
+# 1. Hub first — everything else points at it.
+ssh gateway "bash -lc 'cd ~/nixosdotfiles && git pull && sudo nixos-rebuild switch --flake .#gateway'"
+
+# 2. artemis.
+ssh artemis "bash -lc 'cd ~/nixosdotfiles && git pull && sudo nixos-rebuild switch --flake .#artemis'"
+
+# 3. ariane.
+cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
+```
+
+## Post-rollout checks
+
+- [ ] `wip` outside a repo lists pending snapshots and missing repos
+- [ ] Edit a file on artemis, wait 5 min, `cd` into that repo on ariane → the `⬇` notice appears
+- [ ] `git remote -v`, `git branch -a`, and `git log --all` in a work repo are unchanged from before rollout
+- [ ] `Ctrl+R` shows the fzf.fish interface with commands from the other machine
+- [ ] `Ctrl+T`, `Ctrl+Alt+L`, `Ctrl+Alt+S`, `Ctrl+V`, `Ctrl+Alt+P` still work
+- [ ] A file dropped in `~/notes` reaches both other machines
+- [ ] `~/.claude/skills` resolves to `~/nixosdotfiles/claude/skills` and is writable
+- [ ] `ssh gateway "bash -lc 'sudo -u ci ls /home/kyle'"` fails
+- [ ] Adding a package on one machine produces the drift warning on the other
+
+## Deferred
+
+- **gateway reachability from ariane off the home network** is still unproven. It answers at 4 ms from the office, but `gateway.lan.kmello.dev` resolves through pfsense to `10.11.12.105`, and it is unconfirmed whether that is a tailnet subnet route or plain LAN. Test from a phone hotspot; if it fails, add `services.tailscale.enable = true` to `hosts/sync-hub.nix`.
+- **`services.atuin.openRegistration`** must be flipped to `false` after both clients register (Task 10, Step 5).
+- **Shadow-cache pruning** — `~/.cache/wip` grows by one bare repo per repo touched. Bounded by snapshot trees only, no history, so it is small; add a prune to the tick script if it becomes a problem.
+- **artemis's 37 repos vs ariane's 22.** `wip clone` surfaces the gap, but cloning all of them onto a work laptop is probably not wanted. Expect to clone selectively.
