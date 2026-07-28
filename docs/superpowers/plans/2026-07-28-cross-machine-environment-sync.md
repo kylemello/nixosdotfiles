@@ -88,6 +88,72 @@ Confirmed on 2026-07-28; do not re-derive.
 
 ---
 
+# Phase 0 — Escape hatch
+
+**Status: COMPLETE (2026-07-28).** Recorded here as the undo runbook.
+
+The goal is a restart point, not a backup regime. Most of what this project
+touches is already reversible: the flake is git, Nix keeps generations, and the
+repos are never written to. What follows is the small remainder.
+
+## Restore points
+
+| Machine | State at baseline | Undo |
+|---|---|---|
+| flake repo | tag **`pre-sync`** → `df21304` (docs only; nothing functional had landed) | `git reset --hard pre-sync` |
+| ariane | HM generation **4** (2026-07-27 23:50) | `home-manager switch --rollback` |
+| artemis | system generation **152** (HM included — it uses the NixOS module) | `nixos-rebuild switch --rollback` |
+| gateway | system generation **13**, VMID **101** on **zarya** | rollback to 13 — no VM snapshot taken, gateway is disposable |
+
+## Archived off-machine
+
+`truenas_admin@truenas:~/escape-hatch/` — verified 2026-07-28, checksums matched
+source byte-for-byte and both archives list cleanly.
+
+| File | Size | SHA-256 | Entries |
+|---|---|---|---|
+| `claude-ariane.tgz` | 21 M | `a970b6e0…2c9261c1` | 3598 |
+| `claude-artemis.tgz` | 68 M | `a71e4b2a…09720b4a` | 3925 |
+
+`/home/truenas_admin` is on **boot-pool**, which TrueNAS wipes on major
+upgrades. Fine for a days-long escape hatch, not for archival. The pool
+datasets under `/mnt/Infinity` need a sudo password.
+
+## What needs no undo
+
+- **The repos.** Nothing in this system writes to them. `wip_snapshot` builds
+  its tree through a temp index and pushes by URL; Task 3's suite asserts
+  `remote -v`, `branch -a`, `for-each-ref`, `HEAD`, `status` and the byte-hash
+  of `.git/index` are unchanged. The single exception is `wip pull`, which is
+  why Task 5 carries a safety ref.
+- **`~/notes`, `~/scratch`, `~/.cache/wip`, `~/.local/state/wip`** — all newly
+  created. `rm -rf` is a complete undo.
+- **Syncthing** — Task 9 creates the folders empty. There is nothing in them to
+  delete, so the delete-propagation footgun cannot fire.
+
+## Full undo
+
+```bash
+git -C ~/nixosdotfiles reset --hard pre-sync
+home-manager switch --flake .#ariane                          # ariane
+ssh artemis "bash -lc 'sudo nixos-rebuild switch --flake ~/nixosdotfiles#artemis'"
+ssh gateway "bash -lc 'sudo nixos-rebuild switch --flake ~/nixosdotfiles#gateway'"
+rm -rf ~/notes ~/scratch ~/.cache/wip ~/.local/state/wip
+# only if Task 11 ran:
+scp truenas_admin@truenas:~/escape-hatch/claude-ariane.tgz /tmp/
+rm -rf ~/.claude && tar xzf /tmp/claude-ariane.tgz -C ~
+```
+
+## Out of scope, but standing
+
+**artemis has no backup of any kind.** Its 8 G of `~/work` + `~/personal` lives
+in a WSL vhdx that nothing captures. This plan does not endanger it — nothing
+writes to those repos — but the exposure predates this work and outlives it.
+ariane is covered by Time Machine to `Infinity/mac_time_machine` (839 G stored,
+and `~/work`, `~/personal`, `~/.claude`, `~/nixosdotfiles` are all Included).
+
+---
+
 # Phase 1 — Gateway hub
 
 Everything else depends on this. Phase 1 is a safe stopping point: it produces a working hub with nothing pointed at it yet.
@@ -735,7 +801,7 @@ needs to spot repos that exist on one machine only."
 
 **Interfaces:**
 - Consumes: everything from Tasks 3–4
-- Produces: `wip`, `wip push`, `wip diff`, `wip pull`, `wip clone` — the user-facing surface. Task 7's timer calls `wip push --all`.
+- Produces: `wip`, `wip push`, `wip diff`, `wip pull`, `wip undo`, `wip clone` — the user-facing surface. Task 7's timer calls `wip push --all`; Task 8's fish hook calls `wip notice`.
 
 Every verb derives its repo from `$PWD`. There is no repo argument and no host argument.
 
@@ -812,6 +878,26 @@ wip_cmd_diff() {
   git --git-dir="$shadow" --work-tree="$repo" diff "refs/wip/$(wip_other_host)"
 }
 
+# Capture the CURRENT working tree into the shadow repo before anything
+# overwrites it. `wip pull` is the only operation in this system that writes to
+# a working tree, so it is the only one that can lose work — this makes it
+# reversible via `wip undo`.
+#
+# Everything is written through the SHADOW's git-dir with the real repo as
+# --work-tree, so the objects land in the cache and the real repo is only ever
+# read. .gitignore still applies, because `add -A` reads the ignore files out
+# of the work tree.
+wip_safety_ref() {
+  local repo="$1" shadow="$2" idx tree sha
+  idx="$(mktemp "${TMPDIR:-/tmp}/wip-safe.XXXXXX")"
+  GIT_INDEX_FILE="$idx" git --git-dir="$shadow" --work-tree="$repo" add -A
+  tree="$(GIT_INDEX_FILE="$idx" git --git-dir="$shadow" write-tree)"
+  rm -f "$idx"
+  sha="$(git --git-dir="$shadow" commit-tree "$tree" \
+         -m "pre-pull@$WIP_HOST $(date -Iseconds)")"
+  git --git-dir="$shadow" update-ref refs/wip/pre-pull "$sha"
+}
+
 # Deliberate by design: never overwrite a working tree without consent.
 wip_cmd_pull() {
   local repo slug shadow force="${1:-}" reply
@@ -831,8 +917,29 @@ wip_cmd_pull() {
   printf 'Apply this snapshot over %s? [y/N] ' "$repo"
   read -r reply
   case "$reply" in
-    y|Y) git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- .
-         echo "wip: applied." ;;
+    y|Y) wip_safety_ref "$repo" "$shadow"
+         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- .
+         echo "wip: applied. Previous tree saved — \`wip undo\` restores it." ;;
+    *)   echo "wip: aborted." ;;
+  esac
+}
+
+# Restore the tree as it was immediately before the last `wip pull`.
+wip_cmd_undo() {
+  local repo slug shadow reply
+  repo="$(wip_cwd_repo)"
+  [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
+  slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
+  git --git-dir="$shadow" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null 2>&1 \
+    || { echo "wip: no pre-pull snapshot for this repo"; return 0; }
+
+  echo "Restoring the tree from $(git --git-dir="$shadow" log -1 --format=%s refs/wip/pre-pull):"
+  git --git-dir="$shadow" --work-tree="$repo" diff --stat refs/wip/pre-pull
+  printf 'Restore? [y/N] '
+  read -r reply
+  case "$reply" in
+    y|Y) git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip/pre-pull -- .
+         echo "wip: restored." ;;
     *)   echo "wip: aborted." ;;
   esac
 }
@@ -898,13 +1005,56 @@ case "${1:-status}" in
   fetch)     wip_cmd_fetch_all ;;
   diff)      wip_cmd_diff ;;
   pull)      shift; wip_cmd_pull "$@" ;;
+  undo)      wip_cmd_undo ;;
   clone)     wip_cmd_clone ;;
   notice)    repo="$(wip_cwd_repo)"; [ -n "$repo" ] && wip_notice "$repo" ;;
-  *)         echo "usage: wip [status|push [--all]|fetch|diff|pull [--force]|clone]" >&2; exit 1 ;;
+  *)         echo "usage: wip [status|push [--all]|fetch|diff|pull [--force]|undo|clone]" >&2; exit 1 ;;
 esac
 ```
 
-- [ ] **Step 3: Smoke-test the dispatcher against the sandbox**
+- [ ] **Step 3: Test the safety ref — this is the one path that can lose work**
+
+Append to `tests/wip.test.sh` before the final summary block:
+
+```bash
+# --- pull safety ref ---------------------------------------------------------
+setup
+# Local edit we must not lose, plus a snapshot from "the other host".
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+printf 'my-local-work\n' > "$REPO/tracked.txt"
+printf 'my-scratch\n'    > "$REPO/local-only.txt"
+wip_fetch "$REPO"
+
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+wip_safety_ref "$REPO" "$SHADOW"
+check "safety: ref created" \
+  "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null && echo yes || echo no)" "yes"
+
+# Simulate the destructive half of `wip pull`.
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/otherhost -- .
+check "safety: pull did overwrite the local edit" "$(cat "$REPO/tracked.txt")" "from-other"
+
+# Now undo it.
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/pre-pull -- .
+check "safety: undo restores the overwritten file" "$(cat "$REPO/tracked.txt")" "my-local-work"
+check "safety: undo restores the untracked file"   "$(cat "$REPO/local-only.txt")" "my-scratch"
+check "safety: real repo still has no refs of its own" \
+  "$(git -C "$REPO" for-each-ref --format='%(refname)' | grep -c '^refs/wip/')" "0"
+teardown
+```
+
+- [ ] **Step 4: Run it**
+
+```bash
+nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
+```
+Expected: `29 passed, 0 failed`. If "undo restores the untracked file" fails, `wip_safety_ref` is reading `HEAD` instead of the working tree — it must build from `add -A` against the live work-tree, with no `read-tree`.
+
+- [ ] **Step 5: Smoke-test the dispatcher against the sandbox**
 
 ```bash
 bash -c '
@@ -927,15 +1077,18 @@ bash -c '
 ```
 Expected: no snapshot notice (the only snapshot is from `testhost`, i.e. this host, not the other one) and a clean exit. Any `command not found` means a function is missing from `wip.sh`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add home/wip/main.sh home/wip/wip.sh
+git add home/wip/main.sh home/wip/wip.sh tests/wip.test.sh
 git commit -m "wip: CLI verbs derived from cwd
 
-status/push/fetch/diff/pull/clone, all taking their repo from \$PWD.
-pull refuses a dirty tree without --force and always confirms before
-touching the working tree. clone reads the other host's manifest to
+status/push/fetch/diff/pull/undo/clone, all taking their repo from \$PWD.
+
+pull is the only operation in this system that writes to a working
+tree, so it captures the current tree to refs/wip/pre-pull first and
+`wip undo` restores it. It also refuses a dirty tree without --force
+and always confirms. clone reads the other host's manifest to
 materialize repos that exist on one machine only."
 ```
 
@@ -1769,6 +1922,7 @@ cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
 - [ ] `wip` outside a repo lists pending snapshots and missing repos
 - [ ] Edit a file on artemis, wait 5 min, `cd` into that repo on ariane → the `⬇` notice appears
 - [ ] `git remote -v`, `git branch -a`, and `git log --all` in a work repo are unchanged from before rollout
+- [ ] In a scratch repo: `wip pull --force` then `wip undo` restores the previous tree, including untracked files
 - [ ] `Ctrl+R` shows the fzf.fish interface with commands from the other machine
 - [ ] `Ctrl+T`, `Ctrl+Alt+L`, `Ctrl+Alt+S`, `Ctrl+V`, `Ctrl+Alt+P` still work
 - [ ] A file dropped in `~/notes` reaches both other machines
