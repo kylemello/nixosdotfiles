@@ -686,7 +686,9 @@ wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
 # overlapping runs would pile up.
 wip_hub_up() {
   wip_local_hub && return 0
-  ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+  # $WIP_SSH, not bare `ssh` — on artemis this must be ssh.exe so the Windows-side
+  # 1Password agent is reachable. Defaults to ssh for the test harness.
+  "${WIP_SSH:-ssh}" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
       "$WIP_REMOTE_HOST" true 2>/dev/null
 }
 
@@ -703,7 +705,7 @@ wip_ensure_bare() {
   if wip_local_hub; then
     git init --bare -q "$WIP_REMOTE_PATH/$slug.git" 2>/dev/null || true
   else
-    ssh "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
+    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
   fi
   mkdir -p "$WIP_STATE"; : > "$flag"
 }
@@ -875,7 +877,7 @@ wip_manifest_write() {
     mkdir -p "$WIP_REMOTE_PATH/_manifest"
     mv "$out" "$(wip_manifest_path "$WIP_HOST")"
   else
-    ssh "$WIP_REMOTE_HOST" "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$(wip_manifest_path "$WIP_HOST")'" < "$out"
+    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$(wip_manifest_path "$WIP_HOST")'" < "$out"
     rm -f "$out"
   fi
 }
@@ -885,7 +887,7 @@ wip_manifest_read() {
   if wip_local_hub; then
     cat "$(wip_manifest_path "$host")" 2>/dev/null || true
   else
-    ssh "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
+    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
   fi
 }
 
@@ -1368,7 +1370,16 @@ let
 
     # Bound git's SSH too, not just wip_hub_up's probe — the hub is LAN-only,
     # so a push attempt from off-network must fail fast rather than block.
-    export GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh -o BatchMode=yes -o ConnectTimeout=5"
+    #
+    # The BINARY is per-host and must not be hardcoded to pkgs.openssh. On artemis
+    # the 1Password SSH agent lives on the Windows host, which is why
+    # home/wsl.nix sets programs.git.settings.core.sshCommand = "ssh.exe".
+    # GIT_SSH_COMMAND OVERRIDES core.sshCommand, so hardcoding Nix's openssh here
+    # would bypass that agent entirely: every push from artemis would fail auth,
+    # and with BatchMode=yes it would fail silently, in the timer's journal only.
+    # wip_hub_up's bare `ssh` has the same problem via the PATH below.
+    export WIP_SSH=${lib.escapeShellArg cfg.sshCommand}
+    export GIT_SSH_COMMAND="$WIP_SSH -o BatchMode=yes -o ConnectTimeout=5"
 
     source ${./wip/wip.sh}
     source ${./wip/main.sh}
@@ -1415,6 +1426,19 @@ in
       default = 5;
       description = "Minutes between snapshot/fetch runs.";
     };
+
+    sshCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "${pkgs.openssh}/bin/ssh";
+      description = ''
+        The ssh binary `wip` uses, for both `git push` and `wip_hub_up`.
+        MUST be overridden to "ssh.exe" on artemis (in home/wsl.nix): its
+        1Password agent lives on the Windows host, and Nix's openssh cannot
+        reach it. Getting this wrong makes every push fail authentication
+        silently, visible only in the timer's journal.
+      '';
+      example = "ssh.exe";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -1429,7 +1453,14 @@ Append to `home/wsl.nix`:
 
 ```nix
   # Logical host name for `wip` refs. See home/wip.nix.
-  kyle.wip.host = "artemis";
+  kyle.wip = {
+    enable = true;
+    host = "artemis";
+    roots = [ "personal" "work" ];
+    # The Windows-side 1Password agent serves this host's keys; Nix's openssh
+    # cannot reach it. Without this every wip push fails auth silently.
+    sshCommand = "ssh.exe";
+  };
 ```
 
 Append to `home/darwin.nix`:
