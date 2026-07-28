@@ -2227,12 +2227,32 @@ per-host claude/local/<host>.json instead."
 
 Syncthing generates a device ID on first run. Start it on each machine, then read the IDs — they are needed on both ends.
 
+**`--device-id` is not a flag** — verified: `syncthing: error: unknown flag --device-id`.
+It is a *subcommand*. And it needs `cert.pem` to already exist, so a config
+directory that has never been used must be `generate`d first.
+
+**The config directory differs per host, and the Home Manager default is not
+`~/.config/syncthing`.** From HM's module source: darwin uses
+`$HOME/Library/Application Support/Syncthing`, Linux uses
+`${XDG_STATE_HOME:-$HOME/.local/state}/syncthing`. gateway is the exception
+because `hosts/sync-hub.nix` sets `configDir` explicitly.
+
 ```bash
-ssh gateway "bash -lc 'syncthing --device-id --home=/home/kyle/.config/syncthing'"
-ssh artemis "bash -lc 'syncthing --device-id --home=\$HOME/.config/syncthing'"
-syncthing --device-id --home="$HOME/Library/Application Support/Syncthing"
+# gateway — configDir is set explicitly in hosts/sync-hub.nix
+ssh gateway "bash -lc 'syncthing device-id --home=/home/kyle/.config/syncthing'"
+
+# artemis — Home Manager default on Linux (NOT ~/.config)
+ssh artemis "bash -lc 'syncthing device-id --home=\$HOME/.local/state/syncthing'"
+
+# ariane — Home Manager default on darwin
+syncthing device-id --home="$HOME/Library/Application Support/Syncthing"
 ```
-Record all three. If a command fails because the config does not exist yet, run `syncthing generate --home=<dir>` first.
+
+Record all three. If one reports `Failed to read device ID ... cert.pem: no such
+file or directory`, that config dir has never been initialised — run
+`syncthing generate --home=<same path>` once, then re-run `device-id`. Verified
+end to end: `generate` prints `Calculated device ID (device=...)` and the
+subsequent `device-id` prints the same value.
 
 - [ ] **Step 2: Write the client module**
 
