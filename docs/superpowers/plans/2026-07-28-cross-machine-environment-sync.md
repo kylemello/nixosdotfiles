@@ -2309,12 +2309,19 @@ cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
   vs 12 on ariane). Portable candidates worth a later look: `glow`, `lazygit`,
   `lazydocker`, `k9s`, `helm`, `glab-cli`, `jrnl`, `jiratui`, `bkt`, `carapace`,
   `devenv`, `croc`, `doom`/`emacs`. ariane-only: `rclone`, `lvim`, `jgit`.
-- **`claude` on ariane is a native self-updating build, not the Nix package.**
-  `~/.local/bin/claude` (PATH position 9) shadows `~/.nix-profile/bin/claude`
-  (position 10). Both are 2.1.220 today, but the native one updates itself and
-  will drift, which bypasses the `sadjow/claude-code-nix` + Cachix machinery
-  documented in CLAUDE.md. Decide which should own `claude` — this plan does not
-  touch it.
+- **`claude` ownership: RESOLVED 2026-07-28 (commit `5fe2660`).** ariane was
+  running a native self-updating build from `~/.local/share/claude` (3 versions,
+  959 MB) symlinked into `~/.local/bin`, which shadowed the Nix `claude-code`
+  because `~/.local/bin` precedes `~/.nix-profile/bin` on PATH. Removed the
+  symlink, the installer's `ClaudeCode.app` wrapper, and the two stale versions
+  (714 MB freed); `/Applications/Claude.app` untouched. `claude` now resolves to
+  `/nix/store/...claude-code-2.1.220/bin/claude`. `DISABLE_AUTOUPDATER=1` added
+  to `home/fish.nix` so the binary cannot reinstall the native build. Also fixed
+  `sessionPath` hardcoding `/home/kyle/.local/bin`, a dead entry on macOS.
+  **artemis was already correct** (`/etc/profiles/per-user/kyle/bin/claude`) and
+  was not rebuilt — it picks up `DISABLE_AUTOUPDATER` on its next switch. Note
+  artemis is on claude 2.1.219 vs ariane's 2.1.220, i.e. it has not rebuilt since
+  the last `nix flake update` — exactly the drift Task 13 warns about.
 - **Homebrew was surveyed and left alone** — see Task 14's preamble. Nix already
   wins PATH, and the apparent duplicates are not duplicates.
 - **artemis's 37 repos vs ariane's 22.** `wip clone` surfaces the gap, but cloning all of them onto a work laptop is probably not wanted. Expect to clone selectively.
