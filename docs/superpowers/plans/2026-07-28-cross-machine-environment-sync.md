@@ -21,6 +21,23 @@
 - **Host identity is baked at build time**, never read from `hostname`. ariane's real hostname is `kyles-macbook-pro`.
 - **Slugs derive from the normalized `origin` URL**, never the directory name. The same project has different directory names on each machine (`DocResolve-brrit-com` vs `DocResolve-brrit.com`, `Census.Navigator.Mobile` vs `CensusNavigator`).
 - **artemis login shell is fish.** Any `ssh artemis '<command>'` in testing must use `ssh artemis "bash -lc '...'"`.
+- **artemis cannot sign commits or reach GitHub from a non-interactive SSH
+  session.** Its git signs via `op-ssh-sign.exe` on the Windows host, and both
+  that and `git@github.com` need the 1Password agent socket, which is absent over
+  `ssh artemis '...'`. Consequences for every task that commits:
+    - Commit on **ariane** wherever the change is platform-neutral.
+    - If you must commit on artemis, use `--no-gpg-sign`, then re-sign from ariane
+      with `git rebase --exec 'git commit --amend --no-edit -S' <base>`. A plain
+      `git rebase` on artemis silently unsigns every replayed commit, including
+      ones that were signed before.
+    - artemis cannot `git fetch`/`push` GitHub non-interactively. Move refs with
+      `git push ssh://artemis/home/kyle/nixosdotfiles master:refs/remotes/origin/master`
+      from ariane, then `git reset --hard refs/remotes/origin/master` on artemis.
+    - `git log --format=%G?` reports `N` for **every** commit here because
+      `gpg.ssh.allowedSignersFile` is unset. That means "cannot verify", not
+      "unsigned" — check with `git cat-file commit <sha> | grep '^gpgsig'`.
+- **`python3` is not on artemis's non-interactive PATH.** Use `jq` (it is in
+  `home/packages/base.nix`).
 - **`nixpkgs` is unstable, `allowUnfree` is on.**
 
 ### Verification commands
@@ -1728,6 +1745,37 @@ functioning. (Original restored byte-for-byte afterward; sha matched.)
 **Ordering:** step 1 below must complete before ariane's custom marketplaces
 resolve, or Claude Code will log missing-marketplace errors on every start.
 
+- [ ] **Step 0: Give ariane the existing `home/claude-code.nix`**
+
+`home/claude-code.nix` already exists (commit `5e4ef1b`, authored 2026-07-19) and
+solves the `~/.claude.json` problem properly: rather than owning the file, it
+idempotently deep-merges declared MCP servers into it at activation with
+`jq --argjson d "$desired" '. * $d'`, validating the JSON first and preserving
+everything else. **Do not reinvent this** — the rest of this task is built around
+`settings.json`, and `.claude.json` is that module's job.
+
+It is imported by `users/kyle/home.nix`, so all four NixOS hosts register the
+MetaMCP `personal` endpoint. `users/kyle/ariane.nix` does **not** import it, so
+**ariane currently has no MetaMCP server at all.** Fix that:
+
+```nix
+    ../../home/claude-code.nix
+```
+
+added to `imports` in `users/kyle/ariane.nix`. Then, once per host:
+
+```bash
+claude mcp login personal
+```
+
+Auth is OAuth and the token goes to the OS keychain, so nothing secret enters
+git. The module's own comment anticipates a second endpoint —
+*"Extend this to add more endpoints later, e.g. a `work` endpoint on work
+hosts"* — which is where a work-scoped MetaMCP URL would go if you want one.
+
+Verify: `nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath`,
+then after activation `jq '.mcpServers' ~/.claude.json` shows `personal`.
+
 - [ ] **Step 1: Clone the prerequisite repos onto ariane**
 
 The two custom marketplaces are `directory` sources, so the repos must exist
@@ -1890,8 +1938,9 @@ in
     #   history.jsonl      append-only from two machines, would conflict
     #   .credentials.json  secret
     #   .claude.json       129 KB of per-project state and MCP servers; uses
-    #                      write-then-rename (a .tmp.<pid> file was observed),
-    #                      so symlinking it is unsafe
+    #                      write-then-rename, so symlinking it is unsafe. It is
+    #                      instead deep-merged into by home/claude-code.nix --
+    #                      see Step 0 below.
     #   cache/ daemon/ session-env/ shell-snapshots/ telemetry/ file-history/
     #   backups/ plugins/  all derived or machine-local
     home.file = {
