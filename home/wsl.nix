@@ -81,4 +81,9 @@
   # atlas/gateway/nixosvm have no second machine to drift from. Relies on
   # kyle.wip.driftCheck (on by default above) to keep `@{u}` fresh.
   kyle.drift.enable = true;
+
+  # Shared shell history through the gateway hub, behind fzf.fish's Ctrl-R.
+  # Enabled HERE, not in users/kyle/home.nix, for the same reason as the two
+  # above — see home/atuin.nix.
+  kyle.atuin.enable = true;
 }

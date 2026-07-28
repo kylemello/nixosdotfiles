@@ -36,4 +36,8 @@
   # profile — see home/drift.nix. Relies on kyle.wip.driftCheck (default true)
   # to keep `@{u}` fresh.
   kyle.drift.enable = true;
+
+  # Shared shell history through the gateway hub, behind fzf.fish's Ctrl-R.
+  # Enabled here, not in a shared profile — see home/atuin.nix.
+  kyle.atuin.enable = true;
 }

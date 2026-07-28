@@ -18,6 +18,7 @@
     # Options only; home/darwin.nix does the enabling. See home/wip.nix.
     ../../home/wip.nix
     ../../home/drift.nix
+    ../../home/atuin.nix
 
     ../../home/darwin.nix
   ];
