@@ -15,6 +15,9 @@
     ../../home/packages/dev.nix
     ../../home/packages/misc.nix
 
+    # Options only; home/darwin.nix does the enabling. See home/wip.nix.
+    ../../home/wip.nix
+
     ../../home/darwin.nix
   ];
 

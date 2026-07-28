@@ -39,4 +39,15 @@
       };
     };
   };
+
+  # Logical host name for `wip` refs. See home/wip.nix. Enabled HERE and not in
+  # users/kyle/home.nix, which all four NixOS hosts import.
+  kyle.wip = {
+    enable = true;
+    host = "artemis";
+    roots = [ "personal" "work" ];
+    # The Windows-side 1Password agent serves this host's keys; Nix's openssh
+    # cannot reach it. Without this every wip push fails auth silently.
+    sshCommand = "ssh.exe";
+  };
 }

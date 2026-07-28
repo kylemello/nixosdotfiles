@@ -8,6 +8,10 @@
     ../../home/tmux.nix
     ../../home/catppuccin.nix
     ../../home/claude-code.nix
+    # Options only — deliberately NOT enabled here. This profile is imported by
+    # all four NixOS hosts (artemis, atlas, gateway, nixosvm); `wip` is turned on
+    # per-host, in home/wsl.nix (artemis).
+    ../../home/wip.nix
 
     ../../home/packages/base.nix
     ../../home/packages/dev.nix

@@ -217,6 +217,11 @@ case "${1:-status}" in
   pull)      shift; wip_cmd_pull "$@" ;;
   undo)      wip_cmd_undo ;;
   clone)     wip_cmd_clone ;;
-  notice)    repo="$(wip_cwd_repo)"; [ -n "$repo" ] && wip_notice "$repo" ;;
+  # `|| true` because this `&&` test is the script's LAST command, so under the
+  # generated binary's `set -euo pipefail` a false test becomes the exit status:
+  # `wip notice` outside a repo measured exit=1 (inside: exit=0). Harmless for
+  # the fish hook, which discards it, but wrong for a documented interface --
+  # "nothing to report" is not a failure.
+  notice)    repo="$(wip_cwd_repo)"; { [ -n "$repo" ] && wip_notice "$repo"; } || true ;;
   *)         echo "usage: wip [status|push [--all]|fetch|diff|pull [--force]|undo|clone]" >&2; exit 1 ;;
 esac
