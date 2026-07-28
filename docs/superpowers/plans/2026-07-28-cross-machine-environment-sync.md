@@ -239,11 +239,33 @@ Expected: a `/nix/store/...drv` path, no errors.
 
 - [ ] **Step 5: Assert ProtectHome is actually on**
 
+The runner is `enable = false`, so **no `github-runner-gateway` unit is generated**
+and reading it directly fails with "does not provide attribute" — verified, the
+filtered service list comes back `[ ]`. Probe a force-enabled copy of the config
+instead, which exercises the real generated unit:
+
 ```bash
-nix eval --raw \
-  .#nixosConfigurations.gateway.config.systemd.services.github-runner-gateway.serviceConfig.ProtectHome
+nix eval --impure --expr '
+  let
+    f = builtins.getFlake (toString ./.);
+    probe = f.nixosConfigurations.gateway.extendModules {
+      modules = [({ lib, ... }: { services.github-runners.gateway.enable = lib.mkForce true; })];
+    };
+  in probe.config.systemd.services.github-runner-gateway.serviceConfig.ProtectHome
+'
 ```
-Expected: `true`. If this prints `false`, Step 2 did not remove the override.
+Expected: `true`. **Before this task it returns `false`** (measured 2026-07-28), so
+this is a genuine before/after check rather than a tautology. `lib.mkForce` is
+required — a plain `enable = true` collides with the config's `false` at equal
+priority and errors on the option, not on ProtectHome.
+
+Also confirm the workDir moved. Option values (unlike generated units) exist even
+when the service is disabled:
+
+```bash
+nix eval --raw .#nixosConfigurations.gateway.config.services.github-runners.gateway.workDir
+```
+Expected: `/var/lib/ci-runner/work`. Before this task it is `/home/ci/actions-runner`.
 
 - [ ] **Step 6: Commit**
 
@@ -2385,6 +2407,11 @@ Expected: a store path. After activation, `which sqlc` resolves under
 This is a commit to `~/personal/claude-plugins`, **not** to this flake.
 `kmello-skills/skills/managing-homebox/SKILL.md` hardcodes an absolute
 `/home/kyle/...` path, so the skill is broken on macOS.
+
+**Ordering dependency:** on ariane this repo does not exist until **Task 11
+Step 1** clones it. If Task 14 runs before Task 11, do this step on artemis
+instead (where the repo already exists) and note that `sed -i ''` is BSD syntax —
+on artemis use `sed -i` with no argument.
 
 ```bash
 cd ~/personal/claude-plugins
