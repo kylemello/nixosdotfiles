@@ -40,4 +40,11 @@
   # Shared shell history through the gateway hub, behind fzf.fish's Ctrl-R.
   # Enabled here, not in a shared profile — see home/atuin.nix.
   kyle.atuin.enable = true;
+
+  # ~/.claude symlinked out of this repo and shared with artemis. Enabled here,
+  # not in a shared profile — see home/claude.nix.
+  kyle.claude = {
+    enable = true;
+    host = "ariane";
+  };
 }

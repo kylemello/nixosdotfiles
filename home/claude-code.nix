@@ -10,18 +10,70 @@
 # The `claude-code` package itself is installed via home/packages/misc.nix.
 let
   # Extend this to add more endpoints later, e.g. a `work` endpoint on work hosts.
-  mcpServers = {
+  #
+  # Split in two on purpose. This module is imported by users/kyle/home.nix, so it
+  # reaches all four NixOS hosts; `personal` has been deployed to all of them since
+  # 2026-07-19 and stays there. The `workstation` set below is added only on the
+  # machines that actually drive Claude Code interactively (kyle.claude.enable —
+  # artemis and ariane), which keeps atlas/gateway/nixosvm byte-identical while
+  # still ending the per-machine drift these four servers had accumulated: as
+  # measured 2026-07-28 they had been added with `claude mcp add` and each lived
+  # on exactly one machine (git/kubernetes/atlassian-aegis on artemis, teams-mcp
+  # on ariane). All four are portable — `uvx` comes from `uv` and `npx` from
+  # `nodejs_24`, both in home/packages/dev.nix, and the rest are plain URLs.
+  #
+  # Declaring a server does NOT authenticate it: `personal` still needs
+  # `claude mcp login personal`, and `atlassian-aegis` still needs one interactive
+  # `/mcp` -> authenticate -> pick the `aegistherapies` site, once per host. (That
+  # replaces the manual `claude mcp add` step documented in dev-plugins/README.md,
+  # which aegis-jira's creating-adt-tickets skill hard-depends on by name.)
+  baseServers = {
     personal = {
       type = "http";
       url = "https://mcp.kmello.dev/metamcp/personal/mcp";
     };
   };
 
+  workstationServers = {
+    atlassian-aegis = {
+      type = "http";
+      url = "https://mcp.atlassian.com/v1/mcp/authv2";
+    };
+    git = {
+      type = "stdio";
+      command = "uvx";
+      args = [ "mcp-server-git" ];
+      env = { };
+    };
+    kubernetes = {
+      type = "stdio";
+      command = "npx";
+      args = [ "mcp-server-kubernetes" ];
+      env = { };
+    };
+    teams-mcp = {
+      type = "stdio";
+      command = "npx";
+      args = [ "-y" "@floriscornel/teams-mcp@latest" ];
+      env = { };
+    };
+  };
+
+  mcpServers =
+    baseServers
+    // lib.optionalAttrs config.kyle.claude.enable workstationServers;
+
   # Only the servers declared above are managed; everything else in ~/.claude.json
-  # (projects, history, cached auth) is preserved by the deep-merge below.
+  # (projects, history, cached auth) is preserved by the deep-merge below. Note the
+  # merge only ever ADDS: dropping a server from this set does not remove it from
+  # a host that already has it — do that with `claude mcp remove`.
   desired = builtins.toJSON { inherit mcpServers; };
 in
 {
+  # For config.kyle.claude.enable above. Imported here as well as from the user
+  # profiles so this module is self-contained; the module system dedupes by path.
+  imports = [ ./claude.nix ];
+
   # ~/.claude.json is a mutable file Claude Code owns at runtime, so we can't render it
   # with home.file (that would clobber its state). Instead, idempotently deep-merge our
   # declared servers into it on each activation. `jq`'s `*` recursively merges objects,

@@ -1,6 +1,23 @@
 { config, pkgs, lib, ... }:
 
 {
+  # Home Manager refuses to replace a pre-existing unmanaged file and fails the
+  # WHOLE rebuild rather than skipping it ("Existing file ... would be
+  # clobbered", check-link-targets.sh). home/claude.nix is about to take over
+  # ~/.claude/{settings.json,settings.local.json,skills}, all three of which
+  # already exist here by hand — note an empty directory counts, so `skills`
+  # collides too. Without this, `nixos-rebuild switch --flake .#artemis` aborts.
+  #
+  # This lives in hosts/wsl.nix, NOT hosts/common.nix, because artemis is the
+  # only NixOS host with any Home-Manager-managed dotfile collisions:
+  # kyle.claude.enable is off on atlas/gateway/nixosvm, and setting the option
+  # in hosts/common.nix perturbs all four systemd home-manager units (measured:
+  # it changes atlas/gateway/nixosvm's system derivation hashes for no benefit).
+  #
+  # The backups are one-shot: a second rebuild fails if a `.hm-bak` from the
+  # first is still sitting there, so clear them once the switch is confirmed.
+  home-manager.backupFileExtension = "hm-bak";
+
   # Enable core WSL integration.
   wsl = {
     enable = true;

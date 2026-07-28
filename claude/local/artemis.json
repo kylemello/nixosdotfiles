@@ -1,0 +1,16 @@
+{
+  "extraKnownMarketplaces": {
+    "claude-code-plugins": {
+      "source": { "source": "github", "repo": "anthropics/claude-code" }
+    },
+    "ui-ux-pro-max-skill": {
+      "source": { "source": "github", "repo": "nextlevelbuilder/ui-ux-pro-max-skill" }
+    },
+    "kmello": {
+      "source": { "source": "directory", "path": "/home/kyle/personal/claude-plugins" }
+    },
+    "kmello-dev": {
+      "source": { "source": "directory", "path": "/home/kyle/work/dev-plugins" }
+    }
+  }
+}

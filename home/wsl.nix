@@ -86,4 +86,13 @@
   # Enabled HERE, not in users/kyle/home.nix, for the same reason as the two
   # above — see home/atuin.nix.
   kyle.atuin.enable = true;
+
+  # ~/.claude symlinked out of this repo and shared with ariane. Enabled HERE
+  # for the same reason as the three above, plus one specific to it: the
+  # symlinks point at ~/nixosdotfiles, which only artemis and ariane have
+  # checked out — on atlas/gateway/nixosvm they would dangle.
+  kyle.claude = {
+    enable = true;
+    host = "artemis";
+  };
 }
