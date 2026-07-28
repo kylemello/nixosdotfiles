@@ -304,3 +304,36 @@ wip_shadow_diff() {
   }
   git --git-dir="$shadow" --work-tree="$repo" diff "$ref" "$@"
 }
+
+# The repo containing $PWD, or empty if we are not in one.
+wip_cwd_repo() { git rev-parse --show-toplevel 2>/dev/null || true; }
+
+# Age of the other host's snapshot for a repo, in seconds. Empty if none.
+wip_snapshot_age() {
+  local shadow="$1" ref="refs/wip/$(wip_other_host)" ts
+  ts="$(git --git-dir="$shadow" log -1 --format=%ct "$ref" 2>/dev/null)" || return 0
+  [ -n "$ts" ] || return 0
+  printf '%s' "$(( $(date +%s) - ts ))"
+}
+
+wip_human_age() {
+  local s="$1"
+  if   [ "$s" -lt 90 ];    then printf '%d sec' "$s"
+  elif [ "$s" -lt 5400 ];  then printf '%d min' "$(( s / 60 ))"
+  elif [ "$s" -lt 172800 ];then printf '%d hr'  "$(( s / 3600 ))"
+  else                          printf '%d days' "$(( s / 86400 ))"; fi
+}
+
+# One-line summary for the current repo, or empty. Used by both `wip` and the
+# fish cd-hook, so they can never disagree.
+wip_notice() {
+  local repo="$1" slug shadow age stat
+  slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
+  [ -d "$shadow" ] || return 0
+  age="$(wip_snapshot_age "$shadow")"
+  [ -n "$age" ] || return 0
+  stat="$(wip_shadow_diff "$repo" "refs/wip/$(wip_other_host)" --shortstat 2>/dev/null)"
+  [ -n "$stat" ] || return 0
+  printf '⬇  snapshot from %s · %s ago ·%s · run `wip pull`\n' \
+    "$(wip_other_host)" "$(wip_human_age "$age")" "$stat"
+}

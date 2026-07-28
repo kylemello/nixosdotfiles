@@ -79,7 +79,15 @@ exit 1
 SPY
   chmod +x "$spydir/ssh"
   : > "$logfile"
-  ( PATH="$spydir:$PATH" "$@" )
+  # `</dev/null` on the subshell, not decoration: the shim above pipes its stdin
+  # through `head -c`, and wip_manifest_write's CLEANUP ssh call
+  # (`ssh host "rm -f tmp"`) passes no stdin of its own, so the shim would read
+  # the TEST SCRIPT's stdin and block forever whenever that is an open pipe with
+  # no data -- measured: the suite hangs indefinitely when run with stdin
+  # attached to a pipe rather than a tty or /dev/null. The publish call supplies
+  # its own `< "$out"`, which overrides this and keeps the partial-transfer
+  # simulation intact.
+  ( PATH="$spydir:$PATH" "$@" </dev/null )
   rc=$?
   rm -rf "$spydir"
   return "$rc"
@@ -341,6 +349,165 @@ check "fetch: shadow diff reports exactly the diverged file" \
 check "fetch: shadow diff exits non-zero when the ref is absent" \
   "$(wip_shadow_diff "$REPO" refs/wip/nosuchhost --name-only >/dev/null 2>&1; echo $?)" \
   "1"
+teardown
+
+# --- pull safety ref ---------------------------------------------------------
+# The one path in this system that writes to a working tree, so the one path
+# that can lose work.
+setup
+# main.sh ends in a dispatcher that runs at SOURCE time -- that is how the
+# generated `wip` binary invokes it -- so hand it the read-only `notice` verb and
+# discard the output. Sourcing rather than exec'ing main.sh as a subprocess is
+# what lets these tests call wip_cmd_pull/wip_safety_ref directly and look at the
+# working tree in between the gate and the destructive checkout.
+# shellcheck source=/dev/null
+source "$HERE/../home/wip/main.sh" notice >/dev/null 2>&1 || true
+
+# The snapshot "the other host" left behind. It holds BOTH a tracked and an
+# untracked file, because `wip pull` overwrites either -- and untracked scratch
+# work is what an overwrite destroys with no trace anywhere in git.
+printf 'from-other\n'    > "$REPO/tracked.txt"
+printf 'other-scratch\n' > "$REPO/scratch.txt"
+mkdir -p "$REPO/node_modules"; printf 'junk\n' > "$REPO/node_modules/x"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+
+# FIRST, while the worktree still matches the snapshot byte for byte AND the
+# freshly fetched shadow has never had an index written to it (bare repo, only
+# ever fetched into) -- exactly the state the fish cd-hook calls wip_notice in.
+# There is nothing to announce. A notice here means wip_notice diffed that EMPTY
+# index, which reports every path in the snapshot as deleted and would nag about
+# a snapshot that is already applied. Order matters: any earlier wip_shadow_diff
+# leaves a warm index behind and this assertion stops being able to see the bug.
+check "notice: an identical tree produces no notice" "$(wip_notice "$REPO")" ""
+
+# Now diverge: local work at the same two paths, which the pull must not lose.
+printf 'my-local-work\n' > "$REPO/tracked.txt"
+printf 'my-scratch\n'    > "$REPO/scratch.txt"
+check "notice: reports the waiting snapshot from the other host" \
+  "$(wip_notice "$REPO" | grep -c 'snapshot from otherhost')" "1"
+
+wip_safety_ref "$REPO" "$SHADOW"
+check "safety: ref created" \
+  "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null && echo yes || echo no)" \
+  "yes"
+# The ref must capture the live WORKING TREE, not HEAD. Asserted against the
+# ref's TREE rather than a file on disk on purpose: `git checkout <tree-ish> -- .`
+# never DELETES paths that are absent from the tree-ish (verified), so a file
+# that exists only locally is never at risk, and checking that it is still there
+# after a restore would prove nothing.
+check "safety: ref captures untracked work" \
+  "$(git --git-dir="$SHADOW" ls-tree -r --name-only refs/wip/pre-pull | grep -c '^scratch\.txt$')" "1"
+check "safety: ref honours .gitignore" \
+  "$(git --git-dir="$SHADOW" ls-tree -r --name-only refs/wip/pre-pull | grep -c node_modules)" "0"
+# Every blob the ref names has to be in the SHADOW's object store, or `wip undo`
+# is a safety net that looks present and tears the moment it is used. An index
+# seeded from the real repo's HEAD (instead of `add -A` against the live work
+# tree) names blobs only the real repo has; measured, `write-tree` still exits 0
+# and prints a hash for such an index but the tree never lands in the shadow, so
+# assert the end state rather than any single step's exit code.
+# Counting the blobs that ARE present (all three: .gitignore, tracked.txt,
+# scratch.txt) rather than counting missing ones, because a ref whose tree object
+# is itself absent makes ls-tree print nothing at all -- "found no missing
+# objects" would then pass for the very worst case.
+check "safety: the ref's blobs all live in the shadow" \
+  "$(git --git-dir="$SHADOW" ls-tree -r refs/wip/pre-pull | awk '{print $3}' \
+     | while read -r o; do git --git-dir="$SHADOW" cat-file -e "$o" 2>/dev/null && echo present; done \
+     | grep -c present)" "3"
+
+# Force wip_safety_ref to fail FOR REAL -- an unwritable TMPDIR makes its mktemp
+# fail, the same technique the snapshot failure-path test above uses -- and
+# confirm the gate holds. This is the pair of assertions that would have caught
+# the original bug, where a failed safety ref still let the destructive checkout
+# run and the user was then told their previous tree had been saved.
+check "safety: pull REFUSES when the safety ref cannot be written" \
+  "$(cd "$REPO"; export TMPDIR="$SANDBOX/no-such-dir"; wip_cmd_pull --force <<<y >/dev/null 2>&1; echo $?)" \
+  "1"
+check "safety: a refused pull leaves the working tree untouched" \
+  "$(cat "$REPO/tracked.txt")" "my-local-work"
+
+# The destructive half of a real `wip pull`, this time with the safety ref in
+# place.
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/otherhost -- .
+check "safety: pull overwrites the tracked file"   "$(cat "$REPO/tracked.txt")" "from-other"
+check "safety: pull overwrites the untracked file" "$(cat "$REPO/scratch.txt")" "other-scratch"
+
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/pre-pull -- .
+check "safety: undo restores the tracked file"   "$(cat "$REPO/tracked.txt")" "my-local-work"
+check "safety: undo restores the untracked file" "$(cat "$REPO/scratch.txt")" "my-scratch"
+check "safety: real repo still has no refs of its own" \
+  "$(git -C "$REPO" for-each-ref --format='%(refname)' | grep -c '^refs/wip/')" "0"
+teardown
+
+# --- batch resilience --------------------------------------------------------
+# Off-LAN every push fails, so per-repo tolerance is load-bearing. This drives
+# wip_cmd_push itself: an inlined copy of its loop would keep passing with the
+# `|| true` deleted from main.sh, which is the thing under test.
+# (main.sh was sourced in the section above.)
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+# A second repo whose push target is missing AND uncreatable, to force a failure.
+BROKEN="$HOME/work/broken"; mkdir -p "$BROKEN"
+git -C "$BROKEN" init -q -b main
+git -C "$BROKEN" config user.email t@t; git -C "$BROKEN" config user.name t
+git -C "$BROKEN" remote add origin https://github.com/acme/broken.git
+printf 'x\n' > "$BROKEN/f.txt"
+git -C "$BROKEN" add -A; git -C "$BROKEN" commit -qm init
+printf 'dirty\n' > "$BROKEN/f.txt"
+# Block bare-repo creation for the broken slug by planting a file where the
+# directory would go.
+: > "$WIP_REMOTE_PATH/$(wip_slug "$BROKEN").git"
+
+# `set -euo pipefail` in the subshell: the generated `wip` binary runs under
+# strict mode, so the tolerance has to hold there and not just under this
+# suite's laxer settings.
+( set -euo pipefail; wip_cmd_push --all ) >/dev/null 2>&1
+BATCH_RC=$?
+check "batch: survives a failing repo" "$BATCH_RC" "0"
+check "batch: the healthy repo still got pushed" \
+  "$(git -C "$WIP_REMOTE_PATH/$(wip_slug "$REPO").git" rev-parse --verify --quiet refs/heads/wip/testhost >/dev/null && echo yes || echo no)" \
+  "yes"
+# Order-independent proof the loop ran to completion: the manifest write is only
+# reached after every repo has been attempted, however find happened to order
+# them.
+check "batch: the post-loop manifest write still ran" \
+  "$([ -f "$WIP_REMOTE_PATH/_manifest/testhost.tsv" ] && echo yes || echo no)" "yes"
+teardown
+
+# --- status output -----------------------------------------------------------
+# `wip` with no verb is the one the human types and the fish hook shows, so its
+# lines have to actually BE lines. wip_notice ends with a newline but the command
+# substitution in wip_cmd_status strips it, so wip_cmd_status has to put it back:
+# without that, every waiting repo and then the shell prompt run together on a
+# single line (measured).
+setup
+REPO2="$HOME/work/demo2"
+mkdir -p "$REPO2"
+git -C "$REPO2" init -q -b main
+git -C "$REPO2" config user.email t@t; git -C "$REPO2" config user.name t
+git -C "$REPO2" remote add origin https://github.com/acme/Second-App.git
+printf 'v1\n' > "$REPO2/tracked.txt"
+git -C "$REPO2" add -A; git -C "$REPO2" commit -qm init
+git init --bare -q "$WIP_REMOTE_PATH/$(wip_slug "$REPO2").git"
+for r in "$REPO" "$REPO2"; do
+  printf 'from-other\n' > "$r/tracked.txt"
+  wip_snapshot "$r"
+  b="$WIP_REMOTE_PATH/$(wip_slug "$r").git"
+  git -C "$b" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+  git -C "$b" update-ref -d refs/heads/wip/testhost
+  printf 'mine\n' > "$r/tracked.txt"
+  wip_fetch "$r"
+done
+# `wc -l` counts newlines, so an unterminated line counts 0 and this is exactly
+# the discriminator.
+check "status: in a repo, the notice is a complete line" \
+  "$( ( cd "$REPO" && wip_cmd_status ) | wc -l | tr -d ' ')" "1"
+check "status: outside a repo, one line per waiting repo" \
+  "$( ( cd "$SANDBOX" && wip_cmd_status ) | grep -c 'snapshot from otherhost')" "2"
 teardown
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
