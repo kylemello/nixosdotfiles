@@ -82,6 +82,13 @@
               modules = [ ./users/kyle/work-kmello.nix catppuccin.homeModules ];
               extraSpecialArgs = { inherit inputs; };
             };
+            # macOS (aarch64-darwin) work laptop. Modeled on artemis's user
+            # environment; catppuccin comes in via home/catppuccin.nix.
+            "ariane" = home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [ ./users/kyle/ariane.nix ];
+              extraSpecialArgs = { inherit inputs; };
+            };
           };
         };
 

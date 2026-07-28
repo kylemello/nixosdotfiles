@@ -9,6 +9,7 @@
     duf
     dust
     eza
+    fd
     fzf
     gnupg
     htop
@@ -18,7 +19,9 @@
     ripgrep
     tealdeer
     unzip
+    wget
     xh
+    yq-go
     zoxide
   ];
 }

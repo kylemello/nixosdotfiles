@@ -17,6 +17,7 @@
     emacs-nox
     gcc
     gh
+    gitleaks
     glab
     gnumake
     go
@@ -28,6 +29,7 @@
     lazygit
     nodejs_24
     openssl
+    opentofu
     php
     phpactor
     pkg-config

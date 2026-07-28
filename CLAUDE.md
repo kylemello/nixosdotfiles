@@ -15,7 +15,7 @@ Personal, declarative Nix configuration for multiple machines (NixOS systems + s
 sudo nixos-rebuild switch --flake .#artemis
 
 # Apply a standalone Home Manager profile (non-NixOS hosts)
-home-manager switch --flake .#"kmello@iodine"   # or .#kyle-work
+home-manager switch --flake .#"kmello@iodine"   # or .#kyle-work, .#ariane
 
 # Update overlay-pinned packages (e.g. infisical) to latest upstream — see "Overlays" below
 nix run .#update-overlays
@@ -56,7 +56,11 @@ The `overlays` list is defined once in `flake.nix` and threaded into **both** Ni
 | `gateway` | QEMU guest VM |
 | `nixosvm` | Hyper-V desktop VM (Gnome/Wayland, 4K); SSH on port 422 |
 
-Standalone profiles: `kyle-work` and `kmello@iodine` (work laptop / `iodine` host).
+Standalone profiles:
+| Profile | Role |
+|---------|------|
+| `kyle-work`, `kmello@iodine` | Office remote work machines. (`kyle-work` imports a since-removed `home/common.nix` and is stale; `kmello@iodine` is the live one.) |
+| `ariane` | macOS (`aarch64-darwin`) work laptop. **Home Manager only, no nix-darwin** (Homebrew keeps GUI casks; Nix owns the CLI toolchain). Mirrors artemis's user env via `users/kyle/ariane.nix` + `home/darwin.nix` (git signing through the macOS 1Password `op-ssh-sign`; forces fish inside tmux). Built on Determinate Nix. Linux-only pkgs (e.g. `msodbcsql18`) are guarded with `lib.optionals stdenv.isLinux`. |
 
 ## Overlays and the auto-update system
 
