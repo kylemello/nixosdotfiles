@@ -39,6 +39,29 @@
 - **`python3` is not on artemis's non-interactive PATH.** Use `jq` (it is in
   `home/packages/base.nix`).
 - **`nixpkgs` is unstable, `allowUnfree` is on.**
+- **`users/kyle/home.nix` is imported by ALL FOUR NixOS hosts** — artemis, atlas,
+  gateway, nixosvm (verified: `grep -l users/kyle/home.nix machines/*/configuration.nix`).
+  It is NOT artemis-only. Three consequences bind every remaining task:
+    1. **Never enable a new module from `users/kyle/home.nix`.** Import it there if
+       the options should exist everywhere, but set `enable = true` only in
+       `home/wsl.nix` (artemis) and `home/darwin.nix` (ariane), which are per-host.
+       Enabling from the shared profile gave gateway a second Syncthing that
+       reconfigures the hub, and put `wip` and atuin on atlas and nixosvm.
+    2. **Every option a module requires must have a `default`.** An option with a
+       type and no default is a hard eval error the moment anything reads it —
+       verified: `error: The option 'kyle.wip.host' was accessed but has no value
+       defined.` `kyle.wip.host` and `kyle.claude.host` were set only in
+       artemis/ariane files, so atlas, gateway and nixosvm would fail to evaluate.
+    3. **Verify against a host that sets nothing**, not just artemis and ariane.
+       `nix eval .#nixosConfigurations.atlas.config.system.build.toplevel.drvPath`
+       is the check that catches this class; the per-task gates as originally
+       written all stayed green while three hosts were broken.
+- **Home Manager refuses to replace an existing unmanaged file** and aborts the whole
+  activation. `home-manager.backupFileExtension` is set nowhere in this repo, so any
+  task that takes ownership of a path that already exists on a host must set it.
+- **Briefs are snapshots.** `scripts/task-brief` extracts from the plan at the moment
+  it runs. After editing the plan, regenerate every brief you have not yet dispatched
+  — a stale brief silently reintroduces the defect you just fixed.
 
 ### Verification commands
 
@@ -1434,6 +1457,32 @@ and add to each profile body:
   };
 ```
 
+**Put that block in `home/wsl.nix` and `home/darwin.nix`, NOT in
+`users/kyle/home.nix`.** The shared profile is imported by all four NixOS hosts, so
+enabling there would put `wip` on atlas, nixosvm, and gateway — and gateway would
+snapshot its own copies of `~/personal`/`~/work` to itself. Import
+`../../home/wip.nix` from both user profiles so the options exist; enable per-host.
+
+Give `host` a default so the three hosts that never set it still evaluate:
+
+```nix
+    host = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      description = "... Empty means this host does not participate.";
+    };
+```
+
+and assert it is set when enabled, so a misconfiguration fails loudly rather than
+producing refs named `wip/`:
+
+```nix
+    assertions = [{
+      assertion = !cfg.enable || cfg.host != "";
+      message = "kyle.wip.enable is true but kyle.wip.host is unset.";
+    }];
+```
+
 - [ ] **Step 4: Track the new files and verify both platforms evaluate**
 
 ```bash
@@ -1754,11 +1803,11 @@ Create `home/atuin.nix`:
               --scheme=history \
               --prompt="History> " \
               --query=(commandline) \
-              --preview="string replace --regex '$time_prefix_regex' \'\' -- {} | fish_indent --ansi" \
+              --preview="string replace --regex '$time_prefix_regex' ''' -- {} | fish_indent --ansi" \
               --preview-window="bottom:3:wrap" \
               $fzf_history_opts |
           string split0 |
-          string replace --regex $time_prefix_regex \'\'
+          string replace --regex $time_prefix_regex '''
       )
 
       if test $status -eq 0
@@ -2099,6 +2148,10 @@ in
 {
   options.kyle.claude.host = lib.mkOption {
     type = lib.types.str;
+    # MUST have a default: users/kyle/home.nix reaches all four NixOS hosts, and
+    # only artemis/ariane set this. Empty means "do not manage Claude config here",
+    # and the config block below is gated on it.
+    default = "";
     description = ''
       Which claude/local/<host>.json this machine uses. Set alongside
       kyle.wip.host in home/wsl.nix and home/darwin.nix.
@@ -2106,7 +2159,7 @@ in
     example = "artemis";
   };
 
-  config = {
+  config = lib.mkIf (config.kyle.claude.host != "") {
     # Verified 2026-07-28: Claude Code writes THROUGH these symlinks rather than
     # replacing them, so /config, /plugin and "always allow" all keep working
     # and their changes land in git.
@@ -2166,6 +2219,19 @@ Expected: two store paths, then `ariane`.
 
 Home Manager refuses to clobber unmanaged files, so back them up first — `-b`
 renames anything in the way to `<file>.backup` instead of failing.
+
+First set a backup extension for the NixOS hosts, or activation aborts. gateway and
+artemis already have a real `~/.claude/settings.json`, and Home Manager refuses to
+replace an unmanaged file — it fails the entire rebuild, so the hub never deploys.
+Add to `hosts/common.nix`:
+
+```nix
+  home-manager.backupFileExtension = "hm-bak";
+```
+
+`-b backup` is the standalone equivalent for ariane, and note it is **not
+idempotent** — a second run fails if `<file>.backup` already exists, so clear or
+rename stale backups between attempts.
 
 ```bash
 home-manager switch -b backup --flake .#ariane
