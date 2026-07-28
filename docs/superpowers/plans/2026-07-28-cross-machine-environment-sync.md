@@ -1031,15 +1031,35 @@ wip_cmd_diff() {
 # --work-tree, so the objects land in the cache and the real repo is only ever
 # read. .gitignore still applies, because `add -A` reads the ignore files out
 # of the work tree.
+# Every step is guarded and the function returns non-zero on any failure. This
+# is the guard on a destructive operation: if it silently half-worked, `wip pull`
+# would overwrite the working tree and then claim the previous state was saved.
+# Its caller MUST refuse to proceed when this returns non-zero.
 wip_safety_ref() {
   local repo="$1" shadow="$2" idx tree sha
-  idx="$(mktemp "${TMPDIR:-/tmp}/wip-safe.XXXXXX")"
-  GIT_INDEX_FILE="$idx" git --git-dir="$shadow" --work-tree="$repo" add -A
-  tree="$(GIT_INDEX_FILE="$idx" git --git-dir="$shadow" write-tree)"
+  idx="$(mktemp "${TMPDIR:-/tmp}/wip-safe.XXXXXX")" || {
+    printf 'wip: %s: mktemp failed, refusing to pull without a safety ref\n' "$repo" >&2
+    return 1; }
+  if ! GIT_INDEX_FILE="$idx" git --git-dir="$shadow" --work-tree="$repo" add -A; then
+    rm -f "$idx"
+    printf 'wip: %s: could not stage the current tree for the safety ref\n' "$repo" >&2
+    return 1
+  fi
+  if ! tree="$(GIT_INDEX_FILE="$idx" git --git-dir="$shadow" write-tree)" || [ -z "$tree" ]; then
+    rm -f "$idx"
+    printf 'wip: %s: write-tree failed for the safety ref\n' "$repo" >&2
+    return 1
+  fi
   rm -f "$idx"
-  sha="$(git --git-dir="$shadow" commit-tree "$tree" \
-         -m "pre-pull@$WIP_HOST $(date -Iseconds)")"
-  git --git-dir="$shadow" update-ref refs/wip/pre-pull "$sha"
+  if ! sha="$(git --git-dir="$shadow" commit-tree "$tree" \
+              -m "pre-pull@$WIP_HOST $(date -Iseconds)")" || [ -z "$sha" ]; then
+    printf 'wip: %s: commit-tree failed for the safety ref\n' "$repo" >&2
+    return 1
+  fi
+  if ! git --git-dir="$shadow" update-ref refs/wip/pre-pull "$sha"; then
+    printf 'wip: %s: could not write refs/wip/pre-pull\n' "$repo" >&2
+    return 1
+  fi
 }
 
 # Deliberate by design: never overwrite a working tree without consent.
@@ -1061,8 +1081,15 @@ wip_cmd_pull() {
   printf 'Apply this snapshot over %s? [y/N] ' "$repo"
   read -r reply
   case "$reply" in
-    y|Y) wip_safety_ref "$repo" "$shadow"
-         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- .
+    y|Y) # Refuse to overwrite the working tree if the safety ref did not land.
+         # Without this gate a failed safety ref still lets the checkout run, and
+         # the success message below would be a lie at the one moment it matters.
+         if ! wip_safety_ref "$repo" "$shadow"; then
+           echo "wip: aborted — could not save your current tree first." >&2
+           return 1
+         fi
+         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- . \
+           || { echo "wip: checkout failed; your tree is saved at refs/wip/pre-pull (\`wip undo\`)." >&2; return 1; }
          echo "wip: applied. Previous tree saved — \`wip undo\` restores it." ;;
     *)   echo "wip: aborted." ;;
   esac
@@ -1175,6 +1202,14 @@ wip_fetch "$REPO"
 
 SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
 wip_safety_ref "$REPO" "$SHADOW"
+check "safety: pull REFUSES when the safety ref cannot be written" \
+  "$(cd "$REPO" && WIP_SAFETY_FAIL=1 wip_cmd_pull --force </dev/null >/dev/null 2>&1; echo $?)" \
+  "1"
+# Guard the guard: with the safety ref forced to fail, the working tree must be
+# untouched. This is the assertion that would have caught the original bug, where
+# a failed safety ref still let the destructive checkout run.
+check "safety: refused pull leaves the working tree untouched" \
+  "$(cat "$REPO/tracked.txt")" "my-local-work"
 check "safety: ref created" \
   "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null && echo yes || echo no)" "yes"
 
