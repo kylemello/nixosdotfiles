@@ -74,4 +74,11 @@
     # directories listed above, add the new one there.
     sshCommand = "ssh.exe";
   };
+
+  # Warn at shell start when artemis is running an older nixosdotfiles than the
+  # checkout, or than ariane has already pushed. Enabled HERE for the same
+  # reason kyle.wip is: users/kyle/home.nix reaches all four NixOS hosts, and
+  # atlas/gateway/nixosvm have no second machine to drift from. Relies on
+  # kyle.wip.driftCheck (on by default above) to keep `@{u}` fresh.
+  kyle.drift.enable = true;
 }

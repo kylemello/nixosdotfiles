@@ -30,4 +30,10 @@
     host = "ariane";
     roots = [ "personal" "work" ];
   };
+
+  # Warn at shell start when ariane is running an older nixosdotfiles than the
+  # checkout, or than artemis has already pushed. Enabled here, not in a shared
+  # profile — see home/drift.nix. Relies on kyle.wip.driftCheck (default true)
+  # to keep `@{u}` fresh.
+  kyle.drift.enable = true;
 }
