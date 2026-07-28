@@ -40,6 +40,23 @@
     };
   };
 
+  # Paths backed by the Windows filesystem. These exist on artemis only; they
+  # cannot cross to macOS, and they must never enter a sync root.
+  #
+  # Already present on disk (created by hand, left as-is):
+  #   ~/.aws                  -> /mnt/c/Users/kylem/.aws
+  #   ~/.azure                -> /mnt/c/Users/kylem/.azure
+  #   ~/.docker/contexts      -> /mnt/c/Users/kylem/.docker/contexts
+  #   ~/.docker/features.json -> /mnt/c/Users/kylem/.docker/features.json
+  #
+  # ~/work/work-knowledge-repo -> /mnt/c/Users/kylem/Vaults/work-knowledge-repo
+  # is a git repo living INSIDE a sync root, on the 9p filesystem. `wip_repos`
+  # uses plain `find` (no -L), which does not traverse symlinks, so it is
+  # skipped. Do not add -L to that find without excluding this path first.
+  #
+  # home/folders.nix creates ~/personal ~/work ~/notes ~/scratch as real
+  # directories on every machine; nothing above is recreated declaratively.
+
   # Logical host name for `wip` refs. See home/wip.nix. Enabled HERE and not in
   # users/kyle/home.nix, which all four NixOS hosts import.
   kyle.wip = {
