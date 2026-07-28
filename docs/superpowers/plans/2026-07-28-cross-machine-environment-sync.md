@@ -2764,6 +2764,37 @@ ssh artemis "bash -lc 'cd ~/nixosdotfiles && git pull && sudo nixos-rebuild swit
 cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
 ```
 
+## Legacy Syncthing (resolved 2026-07-28)
+
+Both machines carry config from an earlier, abandoned attempt to sync `~/work`
+between ariane and artemis directly. It failed on `.git` conflicts — the exact
+failure this design routes around by giving repos to `wip` and scoping Syncthing
+to `~/notes` and `~/scratch`.
+
+Nothing from it is running: no LaunchAgent on ariane, no systemd user unit on
+artemis, and `syncthing` is not on PATH on either. It is dead config, not a
+competing service.
+
+**Do NOT delete the config directories.** The device IDs committed in
+`sync-devices.nix` *are* the identities stored there — verified matching
+character for character (`DQBWPJM…` from ariane's
+`~/Library/Application Support/Syncthing`, `DH2TYQQ…` from artemis's
+`~/.local/state/syncthing`). Deleting them regenerates the TLS certs and
+therefore the device IDs, invalidating the committed values and leaving the two
+machines unable to connect, with no error.
+
+`overrideFolders`/`overrideDevices` (both `true`) do the cleanup declaratively at
+first activation instead:
+
+| | before | after |
+|---|---|---|
+| ariane folders | `default` → `~/Sync`, `work` → `~/work`, one broken entry with no id → `~` | `notes`, `scratch` |
+| ariane devices | self + stale `artemis` (`SHSZ3BB…`, wrong ID) | `gateway` |
+
+Files are never touched — dropping a folder stops syncing it, nothing more.
+`~/Sync` on ariane is empty and can be `rmdir`'d afterward (use `rmdir`, not
+`rm -rf`, so it refuses if something is actually in there).
+
 ## Post-rollout checks
 
 - [ ] `wip` outside a repo lists pending snapshots and missing repos
