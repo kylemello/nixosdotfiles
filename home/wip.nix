@@ -228,6 +228,83 @@ in
     (lib.mkIf cfg.enable {
       home.packages = [ wip ];
 
+      # Announce a waiting snapshot on ENTERING a repo. The user only remembers
+      # `wip` exists while inside a repo, so the hook removes the need to
+      # remember at all.
+      #
+      # COST — measured on ariane 2026-07-28, 200 `cd`s inside an interactive
+      # fish, against a scratch repo with a real snapshot and a real diff. The
+      # brief claimed "sub-millisecond"; that is wrong by two orders of
+      # magnitude. Figures are the delta over fish's own ~19 ms/cd:
+      #
+      #   outside any repo (gate hits, nothing spawned)   +0.3 ms
+      #   inside a repo, nothing waiting                  + 26 ms
+      #   inside a repo, snapshot waiting                 + 52 ms
+      #   same hook with no gate, outside a repo          + 29 ms
+      #
+      # The floor is the `wip` process itself: bash startup plus sourcing
+      # wip/{wip,main}.sh is ~17 ms before any git runs, and `wip notice`
+      # forks git up to five times. Nothing inside `wip` can be trimmed to
+      # matter, so the savings have to come from NOT SPAWNING IT — hence the
+      # two gates below, both of which use only fish builtins (`test`,
+      # `path`, `set`), i.e. zero forks.
+      #
+      # Gate 1, `status is-interactive`: Home Manager sources handler
+      # functions from config.fish ABOVE its own `status is-interactive`
+      # block (fish.nix `sourceHandlersStr`), so without this the hook fires
+      # in scripts too — `fish -c 'cd /tmp'` printed the notice 200 times in
+      # testing.
+      #
+      # Gate 2, the repo-root walk: `wip notice` prints nothing outside a
+      # repo, so finding that out without paying for a process is pure win.
+      # `test -e` follows symlinks and matches `.git` files (worktrees,
+      # submodules) as well as directories, and fish's $PWD is always
+      # normalised, so the walk agreed with `git rev-parse --show-toplevel`
+      # on every path tried. It can disagree only when GIT_DIR/GIT_WORK_TREE
+      # are exported to point somewhere with no `.git` above $PWD; in that
+      # case the notice is skipped and bare `wip` still reports.
+      #
+      # $__wip_last_repo suppresses the re-announce on every subdirectory hop
+      # within one repo: the notice is for ENTERING a repo, and reprinting an
+      # identical line on each `cd src` / `cd ..` is what trains you to stop
+      # reading it. The trade is that a snapshot arriving while you are
+      # already sitting in the repo is not announced until you leave and come
+      # back — bare `wip` reports it any time.
+      programs.fish.functions.__wip_on_pwd = {
+        description = "Announce a waiting wip snapshot on entering a repo";
+        onVariable = "PWD";
+        body = ''
+          status is-interactive; or return
+
+          set -l root
+          set -l d $PWD
+          while true
+              if test -e $d/.git
+                  set root $d
+                  break
+              end
+              set -l up (path dirname $d)
+              # `path dirname /` is `/`, so this is the only loop exit.
+              test "$up" = "$d"; and break
+              set d $up
+          end
+
+          if test -z "$root"
+              set -g __wip_last_repo ""
+              return
+          end
+          test "$root" = "$__wip_last_repo"; and return
+          set -g __wip_last_repo $root
+
+          # Local ref reads only — no network. Silent unless there is news.
+          # stderr is NOT discarded: `wip notice` is quiet on the expected
+          # non-events (no shadow cache, no snapshot, no diff), so anything it
+          # does write is a real fault and the user is the only one who will
+          # ever see it — there is no journal behind an interactive shell.
+          ${wip}/bin/wip notice
+        '';
+      };
+
       # Linux (artemis): systemd user timer.
       #
       # The mkIf is belt-and-braces — Home Manager declares systemd.user on
