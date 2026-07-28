@@ -57,16 +57,38 @@
     # which exists specifically to fence him off from /home), so an
     # unauthenticated GUI/REST API here would be reachable by him over
     # loopback today and the whole LAN/Teleport once the port is open. Auth is
-    # therefore mandatory, not optional. The password file is created by hand
-    # at deploy time, root-owned, outside git:
-    #   sudo install -Dm400 /dev/stdin /var/lib/syncthing/gui-password
-    # (paste the password, then Ctrl-D).
+    # therefore mandatory, not optional.
+    #
+    # The password file is created by hand at deploy time, outside git, and
+    # MUST be owned by the syncthing user (kyle), not root: syncthing-init.service
+    # runs merge-syncthing-config as services.syncthing.user (kyle), and a
+    # root-owned file fails that step with "Permission denied" — silently, in
+    # the sense that the unit still reports active and the file still exists
+    # with sane-looking permissions, but no <password> element ever gets
+    # written and the GUI ends up authenticating nobody. Typing the password
+    # in interactively also doesn't work over `ssh host "bash -lc '...'"`
+    # (no interactive stdin => a 0-byte file, which fails the same silent
+    # way); generate it instead:
+    #   head -c 18 /dev/urandom | base64 | sudo tee /var/lib/syncthing/gui-password >/dev/null
+    #   sudo chown kyle:users /var/lib/syncthing/gui-password
+    #   sudo chmod 400 /var/lib/syncthing/gui-password
+    #   sudo systemctl restart syncthing-init
+    # A full `nixos-rebuild switch` is not needed for a password change —
+    # syncthing-init.service runs merge-syncthing-config and re-applies it on
+    # restart. The file existing is NOT proof it applied: check
+    # `journalctl -u syncthing-init` for the absence of "Permission denied".
     guiPasswordFile = "/var/lib/syncthing/gui-password";
 
     settings = {
       gui.user = "kyle";
       options.urAccepted = -1; # decline usage reporting
 
+      # overrideDevices defaults to true: on every activation, Syncthing
+      # deletes any paired device not declared under settings.devices here
+      # (observed in the journal as "Deleting stale device: <id>..."). Once
+      # Task 12 declares "artemis"/"ariane" below, any device paired
+      # out-of-band (e.g. manually through the GUI) will be dropped the next
+      # time this module is applied — pairing must go through this file.
       folders = {
         "notes" = {
           path = "/home/kyle/notes";
