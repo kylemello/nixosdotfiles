@@ -794,9 +794,17 @@ check "fetch: real repo gains no refs" "$(git -C "$REPO" for-each-ref)" "$BEFORE
 check "fetch: shadow holds the snapshot" \
   "$(git --git-dir="$(wip_shadow "$(wip_slug "$REPO")")" rev-parse --verify --quiet refs/wip/otherhost >/dev/null && echo yes || echo no)" \
   "yes"
-check "fetch: shadow diffs against the real worktree" \
-  "$(git --git-dir="$(wip_shadow "$(wip_slug "$REPO")")" --work-tree="$REPO" diff --name-only refs/wip/otherhost | wc -l | tr -d ' ')" \
-  "0"
+# Assert a KNOWN difference rather than "no difference". Asserting 0 passes
+# vacuously when the ref is missing (diff errors, output empty), which made this
+# assertion INVERTED: it failed against correct code and passed against two
+# different broken fetches.
+printf 'diverged-locally\n' > "$REPO/tracked.txt"
+check "fetch: shadow diff reports exactly the diverged file" \
+  "$(wip_shadow_diff "$REPO" refs/wip/otherhost --name-only | tr -d ' ')" \
+  "tracked.txt"
+check "fetch: shadow diff exits non-zero when the ref is absent" \
+  "$(wip_shadow_diff "$REPO" refs/wip/nosuchhost --name-only >/dev/null 2>&1; echo $?)" \
+  "1"
 teardown
 ```
 
@@ -871,7 +879,28 @@ wip_fetch() {
     git init --bare -q "$shadow"
   fi
   git --git-dir="$shadow" fetch --quiet --prune --force \
-    "$target" 'refs/heads/wip/*:refs/wip/*' 2>/dev/null || return 0
+    "$target" 'refs/heads/wip/*:refs/wip/*' || {
+      printf 'wip: %s: fetch from hub failed\n' "$repo" >&2; return 1; }
+}
+
+# Diff a shadow snapshot ref against the real working tree.
+#
+# The shadow is bare and only ever fetched into, so its index is EMPTY, and
+# `git diff <ref>` consults the index to decide what is tracked. With an empty
+# index every path in the snapshot reports as deleted -- measured: an identical
+# snapshot and worktree produced "1 file changed, 1 deletion(-)". read-tree the
+# ref into the shadow's index first so the comparison is against reality.
+#
+# Every diff of a shadow ref must go through this. Calling `git diff` directly
+# on a shadow git-dir is the bug this function exists to prevent.
+wip_shadow_diff() {
+  local repo="$1" ref="$2"; shift 2
+  local shadow; shadow="$(wip_shadow "$(wip_slug "$repo")")"
+  git --git-dir="$shadow" read-tree "$ref" 2>/dev/null || {
+    printf 'wip: %s: no snapshot ref %s in the shadow cache\n' "$repo" "$ref" >&2
+    return 1
+  }
+  git --git-dir="$shadow" --work-tree="$repo" diff "$ref" "$@"
 }
 ```
 
@@ -940,7 +969,7 @@ wip_notice() {
   [ -d "$shadow" ] || return 0
   age="$(wip_snapshot_age "$shadow")"
   [ -n "$age" ] || return 0
-  stat="$(git --git-dir="$shadow" --work-tree="$repo" diff --shortstat "refs/wip/$(wip_other_host)" 2>/dev/null)"
+  stat="$(wip_shadow_diff "$repo" "refs/wip/$(wip_other_host)" --shortstat 2>/dev/null)"
   [ -n "$stat" ] || return 0
   printf '⬇  snapshot from %s · %s ago ·%s · run `wip pull`\n' \
     "$(wip_other_host)" "$(wip_human_age "$age")" "$stat"
@@ -990,7 +1019,7 @@ wip_cmd_diff() {
   [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
   slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
   [ -d "$shadow" ] || { echo "wip: no snapshot for this repo"; return 0; }
-  git --git-dir="$shadow" --work-tree="$repo" diff "refs/wip/$(wip_other_host)"
+  wip_shadow_diff "$repo" "refs/wip/$(wip_other_host)"
 }
 
 # Capture the CURRENT working tree into the shadow repo before anything
@@ -1028,7 +1057,7 @@ wip_cmd_pull() {
     return 1
   fi
 
-  git --git-dir="$shadow" --work-tree="$repo" diff --stat "refs/wip/$(wip_other_host)"
+  wip_shadow_diff "$repo" "refs/wip/$(wip_other_host)" --stat
   printf 'Apply this snapshot over %s? [y/N] ' "$repo"
   read -r reply
   case "$reply" in
@@ -1049,7 +1078,7 @@ wip_cmd_undo() {
     || { echo "wip: no pre-pull snapshot for this repo"; return 0; }
 
   echo "Restoring the tree from $(git --git-dir="$shadow" log -1 --format=%s refs/wip/pre-pull):"
-  git --git-dir="$shadow" --work-tree="$repo" diff --stat refs/wip/pre-pull
+  wip_shadow_diff "$repo" refs/wip/pre-pull --stat
   printf 'Restore? [y/N] '
   read -r reply
   case "$reply" in
