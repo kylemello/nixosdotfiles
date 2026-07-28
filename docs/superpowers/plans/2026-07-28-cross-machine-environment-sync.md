@@ -565,6 +565,18 @@ wip_url()  { printf 'ssh://%s%s/%s.git' "$WIP_REMOTE_HOST" "$WIP_REMOTE_PATH" "$
 # gateway — and nothing would ever surface the mistake.
 wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
 
+# Is the hub reachable right now? gateway is LAN-only — no tailnet node
+# advertises 10.11.12.0/24 (verified 2026-07-28), so ariane can only reach it on
+# the home network or over UniFi Teleport. An unreachable hub is therefore the
+# NORMAL case, not an error, and must be cheap to detect: without this probe,
+# 22 repos x SSH's ~75s TCP default would hang the timer for ~27 minutes and
+# overlapping runs would pile up.
+wip_hub_up() {
+  wip_local_hub && return 0
+  ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+      "$WIP_REMOTE_HOST" true 2>/dev/null
+}
+
 wip_push_target() {
   if wip_local_hub; then printf '%s/%s.git' "$WIP_REMOTE_PATH" "$1"
   else wip_url "$1"; fi
@@ -856,18 +868,30 @@ Create `home/wip/main.sh`:
 wip_cmd_push() {
   local repo
   if [ "${1:-}" = "--all" ]; then
-    while IFS= read -r repo; do [ -n "$repo" ] && wip_snapshot "$repo"; done < <(wip_repos)
-    wip_manifest_write
+    # Silent no-op when the hub is away — this runs every 5 minutes and being
+    # off-LAN is expected, not worth a log line.
+    wip_hub_up || return 0
+    # `|| true` per repo: one repo in a strange state must not abort the rest,
+    # and must not skip wip_manifest_write below. The tree marker is only
+    # written on a successful push, so a failure simply retries next tick.
+    while IFS= read -r repo; do
+      [ -n "$repo" ] && { wip_snapshot "$repo" || true; }
+    done < <(wip_repos)
+    wip_manifest_write || true
   else
     repo="$(wip_cwd_repo)"
     [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
+    wip_hub_up || { echo "wip: hub ($WIP_REMOTE_HOST) unreachable — will retry on the next tick"; return 0; }
     wip_snapshot "$repo"
   fi
 }
 
 wip_cmd_fetch_all() {
   local repo
-  while IFS= read -r repo; do [ -n "$repo" ] && wip_fetch "$repo"; done < <(wip_repos)
+  wip_hub_up || return 0
+  while IFS= read -r repo; do
+    [ -n "$repo" ] && { wip_fetch "$repo" || true; }
+  done < <(wip_repos)
 }
 
 wip_cmd_diff() {
@@ -1055,6 +1079,43 @@ nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh
 ```
 Expected: `29 passed, 0 failed`. If "undo restores the untracked file" fails, `wip_safety_ref` is reading `HEAD` instead of the working tree — it must build from `add -A` against the live work-tree, with no `read-tree`.
 
+- [ ] **Step 4b: Test that one bad repo does not abort the batch**
+
+Off-LAN every push fails, so per-repo tolerance is load-bearing. Append to
+`tests/wip.test.sh` before the final summary block:
+
+```bash
+# --- batch resilience --------------------------------------------------------
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+# A second repo whose push target is missing AND uncreatable, to force a failure.
+BROKEN="$HOME/work/broken"; mkdir -p "$BROKEN"
+git -C "$BROKEN" init -q -b main
+git -C "$BROKEN" config user.email t@t; git -C "$BROKEN" config user.name t
+git -C "$BROKEN" remote add origin https://github.com/acme/broken.git
+printf 'x\n' > "$BROKEN/f.txt"
+git -C "$BROKEN" add -A; git -C "$BROKEN" commit -qm init
+printf 'dirty\n' > "$BROKEN/f.txt"
+# Block bare-repo creation for the broken slug by planting a file where the
+# directory would go.
+: > "$WIP_REMOTE_PATH/$(wip_slug "$BROKEN").git"
+
+set +e
+( set -euo pipefail; source "$HERE/../home/wip/wip.sh"; \
+  while IFS= read -r r; do [ -n "$r" ] && { wip_snapshot "$r" || true; }; done < <(wip_repos) )
+BATCH_RC=$?
+set -e
+check "batch: survives a failing repo" "$BATCH_RC" "0"
+check "batch: the healthy repo still got pushed" \
+  "$(git -C "$WIP_REMOTE_PATH/$(wip_slug "$REPO").git" rev-parse --verify --quiet refs/heads/wip/testhost >/dev/null && echo yes || echo no)" \
+  "yes"
+teardown
+```
+
+Run it: `nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh`
+Expected: `31 passed, 0 failed`. If "the healthy repo still got pushed" fails,
+the loop aborted on the broken one — the `|| true` is missing.
+
 - [ ] **Step 5: Smoke-test the dispatcher against the sandbox**
 
 ```bash
@@ -1127,6 +1188,10 @@ let
     export WIP_ROOTS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.roots)}
     export WIP_CACHE="''${XDG_CACHE_HOME:-$HOME/.cache}/wip"
     export WIP_STATE="''${XDG_STATE_HOME:-$HOME/.local/state}/wip"
+
+    # Bound git's SSH too, not just wip_hub_up's probe — the hub is LAN-only,
+    # so a push attempt from off-network must fail fast rather than block.
+    export GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh -o BatchMode=yes -o ConnectTimeout=5"
 
     source ${./wip/wip.sh}
     source ${./wip/main.sh}
@@ -2302,7 +2367,25 @@ cd ~/nixosdotfiles && git pull && home-manager switch --flake .#ariane
 
 ## Deferred
 
-- **gateway reachability from ariane off the home network** is still unproven. It answers at 4 ms from the office, but `gateway.lan.kmello.dev` resolves through pfsense to `10.11.12.105`, and it is unconfirmed whether that is a tailnet subnet route or plain LAN. Test from a phone hotspot; if it fails, add `services.tailscale.enable = true` to `hosts/sync-hub.nix`.
+- **gateway is LAN-only, by decision (2026-07-28).** Verified: the routing table
+  sends `10.11.12.0/24` over `en0`, and no tailnet node advertises that range
+  (`magnesium` → `10.1.0.0/24`, `10.1.1.0/24`, `10.1.2.0/24`; `vpn` →
+  `10.20.23.0/24`, `192.168.10–22.0/24`). So ariane reaches the hub on the home
+  network or over **UniFi Teleport**, and not otherwise.
+
+  This is accepted rather than fixed, which is why the hub-unreachable path is
+  handled explicitly rather than left to chance: `wip_hub_up` probes once per run
+  with `ConnectTimeout=3`, `GIT_SSH_COMMAND` bounds git's own SSH at 5s, and both
+  batch verbs no-op silently when the hub is away. Crucially `wip pull`, `wip
+  diff` and the fish cd-hook all read the local shadow cache, so **the entire
+  user-facing surface keeps working offline** — only the background push/fetch
+  pauses, and it resumes on the next tick once you are home or on Teleport.
+
+  **Optional future improvement:** put Tailscale on the UniFi UDM (planned), or
+  `services.tailscale.enable = true` on gateway itself. Either gives the hub a
+  stable `100.x` address reachable from anywhere, at which point point
+  `kyle.wip.remoteHost` at the tailnet name and the pauses disappear. Nothing in
+  this design needs to change for that — it is a one-line option flip.
 - **`services.atuin.openRegistration`** must be flipped to `false` after both clients register (Task 10, Step 5).
 - **Shadow-cache pruning** — `~/.cache/wip` grows by one bare repo per repo touched. Bounded by snapshot trees only, no history, so it is small; add a prune to the tick script if it becomes a problem.
 - **`~/.config` reconciliation is deferred** by decision (34 entries on artemis
