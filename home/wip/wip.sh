@@ -166,3 +166,121 @@ wip_snapshot() {
   fi
   printf '%s' "$tree" > "$marker"
 }
+
+# The other machine. There are exactly two, so this is unambiguous.
+wip_other_host() {
+  case "$WIP_HOST" in
+    artemis) printf 'ariane'  ;;
+    ariane)  printf 'artemis' ;;
+    *)       printf 'otherhost' ;;   # tests
+  esac
+}
+
+wip_shadow() { printf '%s/%s.git' "$WIP_CACHE" "$1"; }
+
+wip_manifest_path() { printf '%s/_manifest/%s.tsv' "$WIP_REMOTE_PATH" "$1"; }
+
+# Publish this machine's repo census: every repo, dirty or not. `wip clone`
+# reads the other host's census to find repos missing here.
+#
+# Matches wip_snapshot's failure discipline: gateway is only reachable from
+# the home LAN or over UniFi Teleport, so an unreachable hub is the NORMAL
+# case, not an exception, and must be surfaced rather than swallowed -- a
+# manifest write that silently "succeeds" while publishing nothing would
+# leave the hub's copy of this host's census stale without any signal, and
+# `wip clone` trusts that census as ground truth for what exists here.
+wip_manifest_write() {
+  local repo slug url rel dirty head out
+  if ! out="$(mktemp "${TMPDIR:-/tmp}/wip-man.XXXXXX")"; then
+    printf 'wip: manifest: mktemp failed, not publishing\n' >&2
+    return 1
+  fi
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    head="$(git -C "$repo" rev-parse --verify --quiet HEAD)" || continue
+    slug="$(wip_slug "$repo")"
+    url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+    rel="${repo#"$HOME"/}"
+    if [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then dirty=0; else dirty=1; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$url" "$rel" "$dirty" "$head" >> "$out"
+  done < <(wip_repos)
+
+  if wip_local_hub; then
+    if ! mkdir -p "$WIP_REMOTE_PATH/_manifest" || ! mv "$out" "$(wip_manifest_path "$WIP_HOST")"; then
+      printf 'wip: manifest: failed to write local hub manifest\n' >&2
+      rm -f "$out"
+      return 1
+    fi
+  else
+    if ! ssh "$WIP_REMOTE_HOST" \
+        "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$(wip_manifest_path "$WIP_HOST")'" < "$out"; then
+      printf 'wip: manifest: hub unreachable, not published\n' >&2
+      rm -f "$out"
+      return 1
+    fi
+    rm -f "$out"
+  fi
+}
+
+# Read another host's manifest. A missing file just means that host hasn't
+# published a census yet (e.g. first run) -- not an error worth failing on --
+# so this still returns success with empty output in that case.
+wip_manifest_read() {
+  local host="$1"
+  if wip_local_hub; then
+    cat "$(wip_manifest_path "$host")" 2>/dev/null || true
+  else
+    ssh "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
+  fi
+}
+
+# Pull the other host's snapshot into a shadow repo under $WIP_CACHE. The real
+# repo is never opened for writing, so it gains no refs and no objects.
+#
+# Same discipline as wip_snapshot: an unreachable hub (the normal case off
+# the home LAN) or a shadow repo that can't be created/fetched into must be
+# reported non-zero with a diagnostic, not swallowed as success -- a caller
+# that trusts a silent "ok" here would tell the user their WIP is current
+# when nothing was actually fetched.
+wip_fetch() {
+  local repo="$1" slug shadow target
+  slug="$(wip_slug "$repo")"
+  shadow="$(wip_shadow "$slug")"
+  target="$(wip_push_target "$slug")"
+
+  if [ ! -d "$shadow" ]; then
+    if ! mkdir -p "$WIP_CACHE"; then
+      printf 'wip: %s: mkdir failed, cannot create shadow cache\n' "$repo" >&2
+      return 1
+    fi
+    if ! git init --bare -q "$shadow"; then
+      printf 'wip: %s: git init --bare failed for shadow repo\n' "$repo" >&2
+      return 1
+    fi
+  fi
+  if ! git --git-dir="$shadow" fetch --quiet --prune --force \
+      "$target" 'refs/heads/wip/*:refs/wip/*' 2>/dev/null; then
+    printf 'wip: %s: fetch from hub failed, will retry next run\n' "$repo" >&2
+    return 1
+  fi
+}
+
+# Diff a shadow snapshot ref against the real working tree.
+#
+# The shadow is bare and only ever fetched into, so its index is EMPTY, and
+# `git diff <ref>` consults the index to decide what is tracked. With an empty
+# index every path in the snapshot reports as deleted -- measured: an identical
+# snapshot and worktree produced "1 file changed, 1 deletion(-)". read-tree the
+# ref into the shadow's index first so the comparison is against reality.
+#
+# Every diff of a shadow ref must go through this. Calling `git diff` directly
+# on a shadow git-dir is the bug this function exists to prevent.
+wip_shadow_diff() {
+  local repo="$1" ref="$2"; shift 2
+  local shadow; shadow="$(wip_shadow "$(wip_slug "$repo")")"
+  git --git-dir="$shadow" read-tree "$ref" 2>/dev/null || {
+    printf 'wip: %s: no snapshot ref %s in the shadow cache\n' "$repo" "$ref" >&2
+    return 1
+  }
+  git --git-dir="$shadow" --work-tree="$repo" diff "$ref" "$@"
+}

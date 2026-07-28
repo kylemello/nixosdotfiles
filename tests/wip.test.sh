@@ -191,5 +191,49 @@ check "discovery: finds repos, skips non-repos and symlinks" \
   "$(wip_repos | wc -l | tr -d ' ')" "1"
 teardown
 
+# --- manifest ----------------------------------------------------------------
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_manifest_write
+MAN="$WIP_REMOTE_PATH/_manifest/testhost.tsv"
+check "manifest: written" "$([ -f "$MAN" ] && echo yes || echo no)" "yes"
+check "manifest: one line per repo" "$(wc -l < "$MAN" | tr -d ' ')" "1"
+check "manifest: records origin" \
+  "$(cut -f2 "$MAN")" "https://github.com/acme/Demo-App.git"
+check "manifest: records rel path" "$(cut -f3 "$MAN")" "work/demo"
+check "manifest: marks dirty" "$(cut -f4 "$MAN")" "1"
+teardown
+
+# --- shadow fetch ------------------------------------------------------------
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+# Pretend the snapshot came from the other host.
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+
+BEFORE_ALLREFS="$(git -C "$REPO" for-each-ref)"
+wip_fetch "$REPO"
+check "fetch: real repo gains no refs" "$(git -C "$REPO" for-each-ref)" "$BEFORE_ALLREFS"
+check "fetch: shadow holds the snapshot" \
+  "$(git --git-dir="$(wip_shadow "$(wip_slug "$REPO")")" rev-parse --verify --quiet refs/wip/otherhost >/dev/null && echo yes || echo no)" \
+  "yes"
+
+# --- shadow diff ---------------------------------------------------------
+# The real repo now diverges locally from the snapshot the other host left
+# behind, so a correct diff must report exactly that one file -- not zero
+# (which a broken read-tree-less diff would report by erroring out on a
+# missing ref, and which an empty-index diff against an IDENTICAL worktree
+# would also report, for the wrong reason: see wip_shadow_diff's comment).
+printf 'diverged-locally\n' > "$REPO/tracked.txt"
+check "fetch: shadow diff reports exactly the diverged file" \
+  "$(wip_shadow_diff "$REPO" refs/wip/otherhost --name-only | tr -d ' ')" \
+  "tracked.txt"
+check "fetch: shadow diff exits non-zero when the ref is absent" \
+  "$(wip_shadow_diff "$REPO" refs/wip/nosuchhost --name-only >/dev/null 2>&1; echo $?)" \
+  "1"
+teardown
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
