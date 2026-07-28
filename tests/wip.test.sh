@@ -510,5 +510,99 @@ check "status: outside a repo, one line per waiting repo" \
   "$( ( cd "$SANDBOX" && wip_cmd_status ) | grep -c 'snapshot from otherhost')" "2"
 teardown
 
+# --- pull/undo from a subdirectory -------------------------------------------
+# A pathspec of `.` resolves against the CWD, so `git checkout <ref> -- .` run
+# from a subdirectory applied only that subtree -- while the diff shown above the
+# prompt, and the "wip: applied." after it, described the whole tree. Nothing was
+# lost (the safety ref is built with `add -A`, which is CWD-independent), but the
+# scope applied disagreed with the scope the user consented to. `:/` always means
+# the top of the work tree.
+setup
+mkdir -p "$REPO/sub"
+printf 'other-top\n'   > "$REPO/top.txt"
+printf 'other-inner\n' > "$REPO/sub/inner.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+printf 'mine-top\n'   > "$REPO/top.txt"
+printf 'mine-inner\n' > "$REPO/sub/inner.txt"
+wip_fetch "$REPO"
+
+( cd "$REPO/sub" && wip_cmd_pull --force <<<y ) >/dev/null 2>&1
+# The load-bearing one: top.txt lives OUTSIDE the directory the pull was run
+# from, so `.` leaves it alone and `:/` applies it.
+check "pull: from a subdirectory, applies files outside that subdirectory" \
+  "$(cat "$REPO/top.txt")" "other-top"
+check "pull: from a subdirectory, still applies that subdirectory" \
+  "$(cat "$REPO/sub/inner.txt")" "other-inner"
+( cd "$REPO/sub" && wip_cmd_undo <<<y ) >/dev/null 2>&1
+check "undo: from a subdirectory, restores the whole tree" \
+  "$(cat "$REPO/top.txt")" "mine-top"
+teardown
+
+# --- WIP_SSH indirection -----------------------------------------------------
+# artemis reaches its 1Password agent through `ssh.exe` on the Windows side, so
+# every ssh call has to go through "${WIP_SSH:-ssh}". GIT_SSH_COMMAND covers
+# git's own push/fetch but nothing covers a direct `ssh`, so a bare one would
+# authenticate against an agent that is not there. These assertions drive the
+# four non-git call sites with WIP_SSH pointed at a stub; each one FAILS if that
+# site reaches for bare `ssh`, because the real ssh cannot reach "unused".
+setup
+export WIP_LOCAL_HUB=0            # take the ssh path, not the local-directory one
+SSHLOG="$SANDBOX/ssh.log"; : > "$SSHLOG"
+cat > "$SANDBOX/ssh-stub" <<STUB
+#!/usr/bin/env bash
+# Stand-in for ssh: record the argv, then run the remote command locally. The
+# command is always the LAST argument, whatever options precede it.
+printf '%s\n' "\$*" >> "$SSHLOG"
+exec bash -c "\${*: -1}"
+STUB
+chmod +x "$SANDBOX/ssh-stub"
+export WIP_SSH="$SANDBOX/ssh-stub"
+
+printf 'dirty\n' > "$REPO/tracked.txt"
+HUB_UP="$(wip_hub_up && echo up || echo down)"
+rm -rf "$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"   # setup made this one locally
+wip_ensure_bare "$(wip_slug "$REPO")"
+wip_manifest_write
+MAN_BACK="$(wip_manifest_read testhost)"
+
+check "ssh: wip_hub_up probes through WIP_SSH" "$HUB_UP" "up"
+check "ssh: wip_ensure_bare creates the hub repo through WIP_SSH" \
+  "$([ -d "$WIP_REMOTE_PATH/$(wip_slug "$REPO").git" ] && echo yes || echo no)" "yes"
+check "ssh: wip_manifest_write publishes through WIP_SSH" \
+  "$([ -f "$WIP_REMOTE_PATH/_manifest/testhost.tsv" ] && echo yes || echo no)" "yes"
+# Matching against the census CONTENT, not against `cat` of the same file: with a
+# bare `ssh` here both sides would be empty and an equality check would pass for
+# the broken case.
+check "ssh: wip_manifest_read reads the census back through WIP_SSH" \
+  "$(printf '%s\n' "$MAN_BACK" | grep -c "$(wip_slug "$REPO")")" "1"
+# 5 invocations: the probe, the bare-repo init, the manifest write and its
+# separate mv, and the read. If you add an ssh call site, this number changes on
+# purpose -- that is the point of pinning it.
+check "ssh: the stub recorded every ssh call site (no bare ssh left)" \
+  "$(grep -c . "$SSHLOG")" "5"
+
+# The remaining two call sites are wip_manifest_write's cleanup, reached only
+# when a publish fails -- and they are `2>/dev/null || true`, so nothing above can
+# see them. Measured: reverting just those two to bare `ssh` failed no assertion
+# at all. So drive a failing publish as well; the tmp-file removal must also go
+# through WIP_SSH, or on artemis a failed publish silently orphans a file on the
+# hub instead of cleaning up.
+: > "$SSHLOG"
+cat > "$SANDBOX/ssh-stub-fail" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SSHLOG"
+case "\${*: -1}" in *"cat > "*) exit 1 ;; esac
+exec bash -c "\${*: -1}"
+STUB
+chmod +x "$SANDBOX/ssh-stub-fail"
+( export WIP_SSH="$SANDBOX/ssh-stub-fail"; wip_manifest_write ) >/dev/null 2>&1
+check "ssh: the failed-publish cleanup goes through WIP_SSH too" \
+  "$(grep -c 'rm -f' "$SSHLOG")" "1"
+unset WIP_SSH
+teardown
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

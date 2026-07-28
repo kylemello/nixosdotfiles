@@ -118,7 +118,11 @@ wip_cmd_pull() {
            echo "wip: aborted — could not save your current tree first." >&2
            return 1
          fi
-         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- . \
+         # `:/` and not `.`: a pathspec of `.` resolves against the CWD, so a pull
+         # from a subdirectory applied only that subtree (measured) while the diff
+         # shown above the prompt, and the "applied" below, described the whole
+         # tree. `:/` always means the top of the work tree, whatever the CWD.
+         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- :/ \
            || { echo "wip: checkout failed; your tree is saved at refs/wip/pre-pull (\`wip undo\`)." >&2; return 1; }
          echo "wip: applied. Previous tree saved — \`wip undo\` restores it." ;;
     *)   echo "wip: aborted." ;;
@@ -139,7 +143,9 @@ wip_cmd_undo() {
   printf 'Restore? [y/N] '
   read -r reply
   case "$reply" in
-    y|Y) git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip/pre-pull -- .
+    y|Y) # `:/`, not `.` -- same reason as wip_cmd_pull: restore the whole tree
+         # regardless of which subdirectory this was run from.
+         git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip/pre-pull -- :/
          echo "wip: restored." ;;
     *)   echo "wip: aborted." ;;
   esac

@@ -10,6 +10,14 @@
 #   WIP_ROOTS        space-separated roots under $HOME ("personal work")
 #   WIP_CACHE        shadow repos live here
 #   WIP_STATE        per-repo markers live here
+#   WIP_SSH          the ssh command to reach the hub; defaults to plain `ssh`
+#
+# EVERY ssh invocation below goes through "${WIP_SSH:-ssh}", never bare `ssh`.
+# artemis is WSL and its 1Password SSH agent lives on the Windows side, which is
+# why home/wsl.nix sets git's core.sshCommand to `ssh.exe`. GIT_SSH_COMMAND
+# covers git's own push/fetch, but nothing covers a direct `ssh` call -- those
+# would reach for an agent that is not there and fail authentication. The
+# `:-ssh` default is what keeps the test suite and non-WSL hosts unaffected.
 
 # Normalize a repo to a stable slug. Derived from `origin` rather than the
 # directory name, because the same project has different directory names on
@@ -60,7 +68,7 @@ wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
 # overlapping runs would pile up.
 wip_hub_up() {
   wip_local_hub && return 0
-  ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+  "${WIP_SSH:-ssh}" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
       "$WIP_REMOTE_HOST" true 2>/dev/null
 }
 
@@ -77,7 +85,7 @@ wip_ensure_bare() {
   if wip_local_hub; then
     git init --bare -q "$WIP_REMOTE_PATH/$slug.git" 2>/dev/null || true
   else
-    ssh "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
+    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
   fi
   mkdir -p "$WIP_STATE"; : > "$flag"
 }
@@ -226,17 +234,17 @@ wip_manifest_write() {
     # exactly this kind of failure.)
     remote_dest="$(wip_manifest_path "$WIP_HOST")"
     remote_tmp="$remote_dest.$$.tmp"
-    if ! ssh "$WIP_REMOTE_HOST" \
+    if ! "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" \
         "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$remote_tmp'" < "$out"; then
       printf 'wip: manifest: hub unreachable, not published\n' >&2
       rm -f "$out"
-      ssh "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
+      "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
       return 1
     fi
     rm -f "$out"
-    if ! ssh "$WIP_REMOTE_HOST" "mv '$remote_tmp' '$remote_dest'"; then
+    if ! "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "mv '$remote_tmp' '$remote_dest'"; then
       printf 'wip: manifest: hub unreachable, not published\n' >&2
-      ssh "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
+      "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
       return 1
     fi
   fi
@@ -250,7 +258,7 @@ wip_manifest_read() {
   if wip_local_hub; then
     cat "$(wip_manifest_path "$host")" 2>/dev/null || true
   else
-    ssh "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
+    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
   fi
 }
 
