@@ -21,6 +21,7 @@
     ../../home/drift.nix
     ../../home/atuin.nix
     ../../home/claude.nix
+    ../../home/sync.nix
 
     ../../home/darwin.nix
   ];

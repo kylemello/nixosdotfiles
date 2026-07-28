@@ -47,4 +47,11 @@
     enable = true;
     host = "ariane";
   };
+
+  # ~/notes and ~/scratch through the gateway Syncthing hub. Enabled here, not
+  # in a shared profile — see home/sync.nix.
+  kyle.sync = {
+    enable = true;
+    host = "ariane";
+  };
 }

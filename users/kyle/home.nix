@@ -10,12 +10,18 @@
     ../../home/claude-code.nix
     # Options only — deliberately NOT enabled here. This profile is imported by
     # all four NixOS hosts (artemis, atlas, gateway, nixosvm); `wip`, the drift
-    # alarm, atuin and the shared ~/.claude are turned on per-host, in
-    # home/wsl.nix (artemis).
+    # alarm, atuin, the shared ~/.claude and Syncthing are turned on per-host,
+    # in home/wsl.nix (artemis).
+    #
+    # home/sync.nix especially: gateway already runs the system Syncthing
+    # (hosts/sync-hub.nix), and a second user-level one there would share its
+    # config directory and rewrite the hub's configuration over the REST API
+    # while reporting success. hosts/sync-hub.nix asserts against it.
     ../../home/wip.nix
     ../../home/drift.nix
     ../../home/atuin.nix
     ../../home/claude.nix
+    ../../home/sync.nix
 
     ../../home/packages/base.nix
     ../../home/packages/dev.nix

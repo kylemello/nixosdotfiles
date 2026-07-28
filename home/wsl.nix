@@ -95,4 +95,12 @@
     enable = true;
     host = "artemis";
   };
+
+  # ~/notes and ~/scratch through the gateway Syncthing hub. Enabled HERE and
+  # never in users/kyle/home.nix — that profile reaches gateway, which already
+  # runs the hub itself. See home/sync.nix for what that mistake does.
+  kyle.sync = {
+    enable = true;
+    host = "artemis";
+  };
 }

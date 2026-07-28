@@ -3,7 +3,33 @@
 # Always-on sync hub. Imported only by gateway. Both endpoints (artemis,
 # ariane) talk to this box rather than to each other, so neither has to be
 # awake for the other to catch up.
+let
+  deviceIds = import ../sync-devices.nix;
+in
 {
+  # This box runs the SYSTEM Syncthing configured below. A Home Manager user
+  # Syncthing here would be a silent disaster rather than a conflict: HM's
+  # Linux probe resolves to ${XDG_CONFIG_HOME:-$HOME/.config}/syncthing, which
+  # is precisely the configDir set below, so the user instance's
+  # syncthing-init would read THIS instance's API key and — with
+  # overrideDevices/overrideFolders on — POST the client's folder definitions
+  # over these, discarding the versioning blocks and DELETEing artemis and
+  # ariane. Both eval and rebuild would report success.
+  #
+  # users/kyle/home.nix is imported by all four NixOS hosts, so home/sync.nix
+  # is imported there for its options and enabled only in home/wsl.nix and
+  # home/darwin.nix. Assertions are forced through system.build.toplevel, so a
+  # clean drvPath eval is proof this never regressed.
+  assertions = [
+    {
+      assertion = !(config.home-manager.users.kyle.services.syncthing.enable or false);
+      message = "gateway runs the system Syncthing (hosts/sync-hub.nix); a Home Manager "
+        + "user Syncthing would share /home/kyle/.config/syncthing and rewrite this "
+        + "config over the REST API. Enable home/sync.nix from home/wsl.nix / "
+        + "home/darwin.nix, not users/kyle/home.nix.";
+    }
+  ];
+
   # --- wip snapshot storage --------------------------------------------------
   # Bare repos created on demand by the `wip` script over SSH (home/wip.nix).
   # 0700 under kyle's home: unreadable by seth (no sudo) and by CI jobs
@@ -85,15 +111,28 @@
 
       # overrideDevices defaults to true: on every activation, Syncthing
       # deletes any paired device not declared under settings.devices here
-      # (observed in the journal as "Deleting stale device: <id>..."). Once
-      # Task 12 declares "artemis"/"ariane" below, any device paired
-      # out-of-band (e.g. manually through the GUI) will be dropped the next
-      # time this module is applied — pairing must go through this file.
+      # (observed in the journal as "Deleting stale device: <id>..."). Now that
+      # "artemis"/"ariane" are declared, any device paired out-of-band (e.g.
+      # manually through the GUI) will be dropped the next time this module is
+      # applied — pairing must go through sync-devices.nix.
+      #
+      # The hub's own ID is deliberately absent: merge-syncthing-config deletes
+      # it as stale on every run and Syncthing's config validation re-adds it
+      # immediately with its name intact (visible in `journalctl -u
+      # syncthing-init` today, and config.xml still carries name="gateway").
+      # Declaring remote peers only keeps this file symmetrical with
+      # home/sync.nix.
+      devices = {
+        artemis.id = deviceIds.artemis;
+        ariane.id = deviceIds.ariane;
+      };
+
       folders = {
         "notes" = {
           path = "/home/kyle/notes";
-          # TODO(Task 12): restore once device IDs are known
-          # devices = [ "artemis" "ariane" ];
+          devices = [ "artemis" "ariane" ];
+          # Versioning is per-device, so these retention copies exist only
+          # here. The endpoints deliberately declare none — see home/sync.nix.
           versioning = {
             type = "staggered";
             params.maxAge = "2592000"; # 30 days, in seconds
@@ -101,8 +140,7 @@
         };
         "scratch" = {
           path = "/home/kyle/scratch";
-          # TODO(Task 12): restore once device IDs are known
-          # devices = [ "artemis" "ariane" ];
+          devices = [ "artemis" "ariane" ];
           versioning = {
             type = "staggered";
             params.maxAge = "604800"; # 7 days
