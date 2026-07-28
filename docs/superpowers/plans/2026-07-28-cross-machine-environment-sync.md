@@ -1065,6 +1065,13 @@ wip_safety_ref() {
   idx="$(mktemp "${TMPDIR:-/tmp}/wip-safe.XXXXXX")" || {
     printf 'wip: %s: mktemp failed, refusing to pull without a safety ref\n' "$repo" >&2
     return 1; }
+  # mktemp leaves a ZERO-BYTE file, and `git add -A` READS the index before writing
+  # it, so a zero-byte GIT_INDEX_FILE is fatal: "index file smaller than expected"
+  # (verified, git 2.54.0). Only a MISSING path reads as an empty index. Without this
+  # rm, wip_safety_ref always fails and `wip pull` can never apply anything.
+  # (wip_snapshot survives the same pattern only because it calls read-tree first,
+  # which WRITES a valid index before add -A reads it.)
+  rm -f "$idx"
   if ! GIT_INDEX_FILE="$idx" git --git-dir="$shadow" --work-tree="$repo" add -A; then
     rm -f "$idx"
     printf 'wip: %s: could not stage the current tree for the safety ref\n' "$repo" >&2
@@ -1113,7 +1120,7 @@ wip_cmd_pull() {
            echo "wip: aborted — could not save your current tree first." >&2
            return 1
          fi
-         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- . \
+         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- :/ \
            || { echo "wip: checkout failed; your tree is saved at refs/wip/pre-pull (\`wip undo\`)." >&2; return 1; }
          echo "wip: applied. Previous tree saved — \`wip undo\` restores it." ;;
     *)   echo "wip: aborted." ;;
@@ -1134,7 +1141,7 @@ wip_cmd_undo() {
   printf 'Restore? [y/N] '
   read -r reply
   case "$reply" in
-    y|Y) git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip/pre-pull -- .
+    y|Y) git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip/pre-pull -- :/
          echo "wip: restored." ;;
     *)   echo "wip: aborted." ;;
   esac
@@ -1243,7 +1250,7 @@ git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/otherhost -- .
 check "safety: pull did overwrite the local edit" "$(cat "$REPO/tracked.txt")" "from-other"
 
 # Now undo it.
-git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/pre-pull -- .
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/pre-pull -- :/
 check "safety: undo restores the overwritten file" "$(cat "$REPO/tracked.txt")" "my-local-work"
 check "safety: undo restores the untracked file"   "$(cat "$REPO/local-only.txt")" "my-scratch"
 check "safety: real repo still has no refs of its own" \
@@ -1296,6 +1303,10 @@ Expected: `31 passed, 0 failed`. If "the healthy repo still got pushed" fails,
 the loop aborted on the broken one — the `|| true` is missing.
 
 - [ ] **Step 5: Smoke-test the dispatcher against the sandbox**
+
+`main.sh` holds only the dispatcher — none of `wip.sh`'s functions — so running it
+alone cannot work. Source both, in the order the generated binary will (Task 6):
+`source home/wip/wip.sh; source home/wip/main.sh <verb>`.
 
 ```bash
 bash -c '
