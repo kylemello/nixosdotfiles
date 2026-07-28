@@ -8,11 +8,22 @@
       VISUAL = "nvim";
       PNPM_HOME = "$HOME/.pnpm";
       UID = "$(id -u)";
+
+      # Nix owns `claude` (the claude-code overlay from sadjow/claude-code-nix,
+      # refreshed by `nix flake update`). Without this, the binary's own
+      # updater reinstalls a native build into ~/.local/share/claude and puts a
+      # symlink in ~/.local/bin, which then shadows the Nix one on PATH — that
+      # had already happened on ariane (3 versions, 959 MB). Verified the
+      # variable is recognised: DISABLE_AUTOUPDATER appears in the binary.
+      DISABLE_AUTOUPDATER = "1";
     };
 
     sessionPath = [
       "$HOME/.pnpm"
-      "/home/kyle/.local/bin"
+      # Was hardcoded to /home/kyle/.local/bin, which is a dead entry on the
+      # ariane Mac (its home is /Users/kyle). $HOME is expanded by the shell,
+      # so it resolves correctly on both.
+      "$HOME/.local/bin"
       "$HOME/.config/emacs/bin"
     ];
 
