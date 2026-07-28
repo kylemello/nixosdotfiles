@@ -21,6 +21,7 @@ in
   imports = [
     ./hardware-configuration.nix
     ../../hosts/common.nix
+    ../../hosts/sync-hub.nix
   ];
 
   # Machine-specific settings
