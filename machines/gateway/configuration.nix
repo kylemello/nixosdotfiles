@@ -46,7 +46,7 @@ in
 
   # Seth — friend who may need occasional access. No sudo (not in wheel),
   # bash shell (familiar), SSH-key-only login.
-  #   - `ci` group      -> read/write the runner workspace under /home/ci
+  #   - `ci` group      -> read/write the runner workspace under /var/lib/ci-runner/work
   #   - `systemd-journal`-> `journalctl -u github-runner-gateway` without sudo
   # (He can also start/stop/restart the runner via the scoped sudo rule below.)
   users.users.seth = {
