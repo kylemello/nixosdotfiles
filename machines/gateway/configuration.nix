@@ -62,8 +62,6 @@ in
 
   # Dedicated service account for the CI runner. No sudo; in `docker` so
   # workflows can build/run containers. Not a login target (no SSH keys).
-  # homeMode 0750 lets the `ci` group (i.e. seth) traverse/read the home,
-  # where the runner workspace lives.
   users.groups.ci = {};
   users.users.ci = {
     isNormalUser = true;
@@ -71,14 +69,13 @@ in
     shell = pkgs.bash;
     group = "ci";
     extraGroups = [ "docker" ];
-    homeMode = "0750";
   };
 
-  # Runner workspace inside ci's home. setgid (2770) so files the runner
-  # creates are group-owned by `ci`, letting seth read/write build artifacts.
-  # The runner wipes this dir's *contents* on every start (not the rest of home).
+  # Runner workspace outside /home so ProtectHome can stay on. setgid (2770)
+  # so files the runner creates are group-owned by `ci`, letting seth read and
+  # write build artifacts. The runner wipes this dir's *contents* on start.
   systemd.tmpfiles.rules = [
-    "d /home/ci/actions-runner 2770 ci ci -"
+    "d /var/lib/ci-runner/work 2770 ci ci -"
   ];
 
   # Let Seth manage just the runner service — no full sudo. Exact commands only.
@@ -108,17 +105,13 @@ in
     tokenFile = "/var/lib/ci-runner/github-token";
     user = "ci";
     group = "ci";
-    workDir = "/home/ci/actions-runner";
+    workDir = "/var/lib/ci-runner/work";
     extraLabels = [ "gateway" "nixos" ];
     extraPackages = with pkgs; [ git docker ];
 
-    # The runner is sandboxed with ProtectHome=true by default, which masks all
-    # of /home — so a workDir under /home/ci is unreachable without this. Turning
-    # it off is REQUIRED for the home-based workDir, but note the tradeoff: CI
-    # jobs can now see other users' home dirs (/home/kyle, /home/seth). If that
-    # matters more than the home-based workspace, move workDir to
-    # /var/lib/ci-runner/work instead and drop this override.
-    serviceOverrides.ProtectHome = false;
+    # ProtectHome is left at the module default (true), so CI jobs cannot read
+    # /home/kyle or /home/seth. The workspace lives under /var/lib, which
+    # ProtectHome does not mask. Seth still reaches it via the `ci` group.
   };
 
   # Assign the Home Manager profile to the user
