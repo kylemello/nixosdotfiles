@@ -1769,9 +1769,44 @@ claude mcp login personal
 ```
 
 Auth is OAuth and the token goes to the OS keychain, so nothing secret enters
-git. The module's own comment anticipates a second endpoint —
-*"Extend this to add more endpoints later, e.g. a `work` endpoint on work
-hosts"* — which is where a work-scoped MetaMCP URL would go if you want one.
+git. The module's own comment anticipates more endpoints — *"Extend this to add
+more endpoints later"* — and there are four waiting, because only `personal` is
+declarative. The rest were added with `claude mcp add` and live on one machine
+each (measured 2026-07-28 from each host's `~/.claude.json`):
+
+| Server | Definition | artemis | ariane |
+|---|---|---|---|
+| `personal` | `http` → `mcp.kmello.dev/metamcp/personal/mcp` | ✅ declarative | ❌ |
+| `git` | `stdio` → `uvx mcp-server-git` | ✅ imperative | ❌ |
+| `kubernetes` | `stdio` → `npx mcp-server-kubernetes` | ✅ imperative | ❌ |
+| `atlassian-aegis` | `http` → `mcp.atlassian.com/v1/mcp/authv2` | ✅ imperative | ❌ |
+| `teams-mcp` | `stdio` → `npx -y @floriscornel/teams-mcp@latest` | ❌ | ✅ imperative |
+
+**All five are portable** — `uvx` comes from `uv` and `npx` from `nodejs_24`, both
+already in `home/packages/dev.nix`, and the other two are plain URLs. So move all
+of them into the module's `mcpServers` set and they become declared once and
+shared, rather than drifting per-machine:
+
+```nix
+  mcpServers = {
+    personal         = { type = "http";  url = "https://mcp.kmello.dev/metamcp/personal/mcp"; };
+    atlassian-aegis  = { type = "http";  url = "https://mcp.atlassian.com/v1/mcp/authv2"; };
+    git              = { type = "stdio"; command = "uvx"; args = [ "mcp-server-git" ]; env = {}; };
+    kubernetes       = { type = "stdio"; command = "npx"; args = [ "mcp-server-kubernetes" ]; env = {}; };
+    teams-mcp        = { type = "stdio"; command = "npx"; args = [ "-y" "@floriscornel/teams-mcp@latest" ]; env = {}; };
+  };
+```
+
+The jq deep-merge makes this safe to apply to a host that already has some of
+them — verified on artemis, where activation added `personal` while leaving
+`git`, `kubernetes` and `atlassian-aegis` untouched.
+
+Confirm afterward that both hosts agree:
+```bash
+jq -S '.mcpServers | keys' ~/.claude.json
+ssh artemis "bash -lc 'jq -S \".mcpServers | keys\" ~/.claude.json'"
+```
+Expected: the same five keys on both.
 
 Verify: `nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath`,
 then after activation `jq '.mcpServers' ~/.claude.json` shows `personal`.
