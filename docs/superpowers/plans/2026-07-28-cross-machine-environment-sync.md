@@ -1561,21 +1561,48 @@ Host identity is baked at build time rather than sniffed from hostname."
 - Modify: `home/wip.nix`
 
 **Interfaces:**
-- Consumes: `cfg.interval`, the `wip` binary from Task 6
+- Consumes: `cfg.interval`, `cfg.sshCommand`, the `wip` binary from Task 6
 - Produces: a recurring `wip push --all && wip fetch` on both platforms
 
 - [ ] **Step 1: Add both platform backends**
 
-In `home/wip.nix`, extend the `config` block. Add to the `let` binding first:
+In `home/wip.nix`, extend the `config` block. Add to the `let` binding first — the
+XDG dirs are hoisted out of the wrapper so the wrapper, the launchd log path and
+the activation `mkdir` can never disagree:
 
 ```nix
+  stateDir = "${config.xdg.stateHome}/wip";
+  cacheDir = "${config.xdg.cacheHome}/wip";
+
+  # A prefix, so an EMPTY sessionPath adds nothing: ":$PATH" has an empty first
+  # entry, which a shell reads as ".". Interpolated inside shell DOUBLE quotes,
+  # never escapeShellArg'd — HM's entries are shell fragments ("$HOME/.pnpm"),
+  # and single-quoting would put a directory literally named `$HOME` on PATH.
+  sessionPathPrefix = lib.concatMapStrings (p: "${p}:") config.home.sessionPath;
+
   tick = pkgs.writeShellScript "wip-tick" ''
     set -uo pipefail
-    ${wip}/bin/wip push --all || true
-    ${wip}/bin/wip fetch     || true
+
+    # No `|| true`: nobody watches a 5-minute timer, so anything that goes wrong
+    # has to reach the journal / agent.log. Both verbs already return 0 for the
+    # expected non-events (hub off-LAN, one repo in a strange state), so a
+    # non-zero here is a real fault and worth failing the unit over.
+    rc=0
+    ${wip}/bin/wip push --all || { rc=$?; printf 'wip-tick: push --all failed (exit %s)\n' "$rc" >&2; }
+    ${wip}/bin/wip fetch      || { rc=$?; printf 'wip-tick: fetch failed (exit %s)\n' "$rc" >&2; }
     ${lib.optionalString cfg.driftCheck ''
-      ${pkgs.git}/bin/git -C "$HOME/nixosdotfiles" fetch --quiet || true
+      # cfg.sshCommand, NOT pkgs.openssh: GIT_SSH_COMMAND overrides
+      # core.sshCommand, and on artemis that is `ssh.exe` reaching the Windows
+      # 1Password agent — hardcoding Nix's openssh would fail auth every tick.
+      # PATH carries sessionPath because `ssh.exe` is a bare name and a timer
+      # never sources hm-session-vars.sh. Reported, but not folded into rc:
+      # being off-network is normal and a permanently-failed unit is noise.
+      PATH="${sessionPathPrefix}$PATH" \
+      GIT_SSH_COMMAND=${lib.escapeShellArg "${cfg.sshCommand} -o BatchMode=yes -o ConnectTimeout=5"} \
+        ${pkgs.git}/bin/git -C "$HOME/nixosdotfiles" fetch --quiet \
+        || printf 'wip-tick: drift fetch of ~/nixosdotfiles failed (exit %s)\n' "$?" >&2
     ''}
+    exit "$rc"
   '';
 ```
 
@@ -1589,59 +1616,84 @@ Add the `driftCheck` option alongside the others:
     };
 ```
 
-Then replace the `config` block:
+Then replace the `config` block. Everything except the assertion goes under one
+`mkIf cfg.enable`, so atlas/gateway/nixosvm stay byte-identical:
 
 ```nix
-  config = lib.mkIf cfg.enable {
-    home.packages = [ wip ];
+  config = lib.mkMerge [
+    { assertions = [ /* unchanged: enable implies host != "" */ ]; }
 
-    # Linux (artemis): systemd user timer.
-    systemd.user = lib.mkIf pkgs.stdenv.isLinux {
-      services.wip = {
-        Unit.Description = "Snapshot dirty working trees to the sync hub";
-        Service = {
-          Type = "oneshot";
-          ExecStart = "${tick}";
+    (lib.mkIf cfg.enable {
+      home.packages = [ wip ];
+
+      # Linux (artemis): systemd user timer.
+      systemd.user = lib.mkIf pkgs.stdenv.isLinux {
+        services.wip = {
+          Unit.Description = "Snapshot dirty working trees to the sync hub";
+          Service = {
+            Type = "oneshot";
+            ExecStart = "${tick}";
+          };
+        };
+        timers.wip = {
+          Unit.Description = "Run wip every ${toString cfg.interval} minutes";
+          Timer = {
+            # OnStartupSec, not OnBootSec: this is the PER-USER manager, which
+            # starts at first login (long after boot on WSL), so OnBootSec = 2m
+            # would already be in the past and the grace period would not exist.
+            OnStartupSec = "2m";
+            OnUnitActiveSec = "${toString cfg.interval}m";
+            # No Persistent = true — systemd.timer(5): it "only has an effect on
+            # timers configured with OnCalendar=", and this timer is monotonic.
+            # After a suspend the interval has elapsed, so it fires on resume.
+          };
+          Install.WantedBy = [ "timers.target" ];
         };
       };
-      timers.wip = {
-        Unit.Description = "Run wip every ${toString cfg.interval} minutes";
-        Timer = {
-          OnBootSec = "2m";
-          OnUnitActiveSec = "${toString cfg.interval}m";
-          Persistent = true;
+
+      # macOS (ariane): launchd agent.
+      launchd.agents.wip = lib.mkIf pkgs.stdenv.isDarwin {
+        enable = true;
+        config = {
+          ProgramArguments = [ "${tick}" ];
+          StartInterval = cfg.interval * 60;
+          RunAtLoad = true;
+          ProcessType = "Background";
+          StandardOutPath = "${stateDir}/agent.log";
+          StandardErrorPath = "${stateDir}/agent.log";
         };
-        Install.WantedBy = [ "timers.target" ];
       };
-    };
 
-    # macOS (ariane): launchd agent.
-    launchd.agents.wip = lib.mkIf pkgs.stdenv.isDarwin {
-      enable = true;
-      config = {
-        ProgramArguments = [ "${tick}" ];
-        StartInterval = cfg.interval * 60;
-        RunAtLoad = true;
-        ProcessType = "Background";
-        StandardOutPath = "${config.home.homeDirectory}/.local/state/wip/agent.log";
-        StandardErrorPath = "${config.home.homeDirectory}/.local/state/wip/agent.log";
-      };
-    };
-
-    home.activation.wipStateDir =
-      lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        $DRY_RUN_CMD mkdir -p "$HOME/.local/state/wip" "$HOME/.cache/wip"
-      '';
-  };
+      # BEFORE setupLaunchAgents, not merely after writeBoundary: launchd does
+      # not create StandardOutPath's parent, and RunAtLoad fires the first tick
+      # the moment the agent is bootstrapped. On Linux that entry does not exist
+      # and HM's dag ignores an edge to an unknown name.
+      home.activation.wipStateDir =
+        lib.hm.dag.entryBetween [ "setupLaunchAgents" ] [ "writeBoundary" ] ''
+          $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg stateDir} ${lib.escapeShellArg cacheDir}
+        '';
+    })
+  ];
 ```
 
-- [ ] **Step 2: Verify both platforms still evaluate**
+- [ ] **Step 2: Verify every host still evaluates**
 
 ```bash
 nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
 nix eval .#nixosConfigurations.artemis.config.system.build.toplevel.drvPath
+nix eval .#nixosConfigurations.atlas.config.system.build.toplevel.drvPath
+nix eval .#nixosConfigurations.gateway.config.system.build.toplevel.drvPath
+nix eval .#nixosConfigurations.nixosvm.config.system.build.toplevel.drvPath
 ```
-Expected: two store paths. A `The option launchd.agents...does not exist` error means the `mkIf isDarwin` was placed outside the attribute rather than on its value.
+Expected: five store paths, and the last three unchanged from before the edit —
+`users/kyle/home.nix` imports this module on all four NixOS hosts, so anything
+that escapes the `mkIf cfg.enable` shows up as a changed hash on the three that
+do not enable `wip`.
+
+Both `mkIf`s in Step 1 are belt-and-braces: HM declares `launchd.agents` and
+`systemd.user` on every platform (`launchd.enable` and `systemd.user.enable`
+each default to their own OS), so neither placement can produce a "does not
+exist" error here.
 
 - [ ] **Step 3: Confirm only the right backend is produced**
 
