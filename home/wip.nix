@@ -3,6 +3,12 @@
 let
   cfg = config.kyle.wip;
 
+  # Resolved once, here, and used by the wrapper, the launchd log paths and the
+  # activation dir alike — see the wrapper's comment on WIP_CACHE for why these
+  # must not be a shell ''${XDG_STATE_HOME:-…} fallback.
+  stateDir = "${config.xdg.stateHome}/wip";
+  cacheDir = "${config.xdg.cacheHome}/wip";
+
   # The script is assembled rather than templated so home/wip/*.sh stay
   # directly testable (see tests/wip.test.sh).
   wip = pkgs.writeShellScriptBin "wip" ''
@@ -38,8 +44,8 @@ let
     # it cannot read a shell fallback. If XDG_STATE_HOME/XDG_CACHE_HOME were ever
     # exported, a fallback here would silently point `wip` at one pair of
     # directories and the timer at another.
-    export WIP_CACHE=${lib.escapeShellArg "${config.xdg.cacheHome}/wip"}
-    export WIP_STATE=${lib.escapeShellArg "${config.xdg.stateHome}/wip"}
+    export WIP_CACHE=${lib.escapeShellArg cacheDir}
+    export WIP_STATE=${lib.escapeShellArg stateDir}
 
     # Bound git's SSH too, not just wip_hub_up's probe — the hub is LAN-only,
     # so a push attempt from off-network must fail fast rather than block.
@@ -56,6 +62,61 @@ let
 
     source ${./wip/wip.sh}
     source ${./wip/main.sh}
+  '';
+
+  # Prefix, not a ":"-joined list: an EMPTY home.sessionPath must expand to
+  # nothing at all. `PATH=":$PATH"` has an empty first entry, which POSIX shells
+  # read as "." — the current directory on the PATH of a background job.
+  #
+  # Interpolated inside shell DOUBLE quotes at the use site, never
+  # escapeShellArg'd: HM's sessionPath entries are shell fragments, not literal
+  # paths — every host here has `$HOME/.pnpm` and friends in the list, and
+  # single-quoting would put a directory literally named `$HOME` on PATH.
+  # Double quotes also cover the entries with spaces (`/mnt/c/Program Files/…`).
+  # This is the same treatment the wip wrapper above gives them.
+  sessionPathPrefix = lib.concatMapStrings (p: "${p}:") config.home.sessionPath;
+
+  # What the timer actually runs. Every command is an absolute store path, with
+  # one deliberate exception (cfg.sshCommand — see the drift block below).
+  tick = pkgs.writeShellScript "wip-tick" ''
+    set -uo pipefail
+
+    # Deliberately no `|| true` in here. A silent tick is the failure mode this
+    # module is written against: nobody watches a five-minute timer, so whatever
+    # goes wrong has to reach the journal (systemd) or agent.log (launchd).
+    #
+    # Both verbs already return 0 for the expected non-events — the hub being
+    # off-LAN, one repo in a strange state (see wip_cmd_push in home/wip/main.sh)
+    # — so a non-zero status here is a real fault, and worth failing the unit
+    # over: `systemctl --user status wip` then shows it without anyone grepping.
+    rc=0
+    ${wip}/bin/wip push --all || { rc=$?; printf 'wip-tick: push --all failed (exit %s)\n' "$rc" >&2; }
+    ${wip}/bin/wip fetch      || { rc=$?; printf 'wip-tick: fetch failed (exit %s)\n' "$rc" >&2; }
+    ${lib.optionalString cfg.driftCheck ''
+      # Fetch the flake repo too, so home/drift.nix can compare against @{u}.
+      # Two things this must not inherit from a login shell, because a timer
+      # has neither:
+      #
+      # 1. The ssh BINARY. On artemis git reaches GitHub through
+      #    core.sshCommand = "ssh.exe" (home/wsl.nix) — the keys live in the
+      #    Windows 1Password agent. GIT_SSH_COMMAND OVERRIDES core.sshCommand,
+      #    so this uses cfg.sshCommand, the very same binary `wip` itself uses;
+      #    hardcoding pkgs.openssh here would bypass that agent and fail auth on
+      #    every single tick. BatchMode/ConnectTimeout match the wrapper's, so
+      #    an off-LAN or key-less run fails fast instead of hanging.
+      # 2. Its PATH. `ssh.exe` is a BARE NAME, resolvable only through
+      #    home.sessionPath — which feeds hm-session-vars.sh, i.e. interactive
+      #    and login shells only, never a systemd user unit or a launchd agent.
+      #
+      # Reported but NOT folded into rc: a laptop being off-network is normal,
+      # and a unit permanently in `failed` for a reason nobody can act on is
+      # just noise that trains you to ignore it.
+      PATH="${sessionPathPrefix}$PATH" \
+      GIT_SSH_COMMAND=${lib.escapeShellArg "${cfg.sshCommand} -o BatchMode=yes -o ConnectTimeout=5"} \
+        ${pkgs.git}/bin/git -C "$HOME/nixosdotfiles" fetch --quiet \
+        || printf 'wip-tick: drift fetch of ~/nixosdotfiles failed (exit %s)\n' "$?" >&2
+    ''}
+    exit "$rc"
   '';
 in
 {
@@ -104,6 +165,17 @@ in
       description = "Minutes between snapshot/fetch runs.";
     };
 
+    driftCheck = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Also fetch the flake repo each tick, for home/drift.nix. Uses
+        `sshCommand`, so it authenticates exactly the way this host's `git`
+        already does; a failure is printed to stderr (journal / agent.log) but
+        does not fail the unit, since being off-network is normal.
+      '';
+    };
+
     sshCommand = lib.mkOption {
       type = lib.types.str;
       default = "${pkgs.openssh}/bin/ssh";
@@ -134,21 +206,93 @@ in
     };
   };
 
-  config = {
-    # Asserted OUTSIDE the mkIf below so it is checked on every host, not only
-    # where wip is enabled.
-    assertions = [
-      {
-        assertion = !cfg.enable || cfg.host != "";
-        message = "kyle.wip.enable is true but kyle.wip.host is unset.";
-      }
-    ];
+  # NOTE for future edits: this module is imported by users/kyle/home.nix,
+  # which ALL FOUR NixOS hosts import (artemis, atlas, gateway, nixosvm).
+  # Enabling belongs in the per-host layers (home/wsl.nix, home/darwin.nix) —
+  # never here and never in the shared profile, or gateway would end up
+  # snapshotting its own ~/personal and ~/work to itself. Everything except the
+  # assertion therefore lives under the mkIf below: atlas, gateway and nixosvm
+  # must come out byte-identical to a tree without this module.
+  config = lib.mkMerge [
+    {
+      # Asserted OUTSIDE the mkIf so it is checked on every host, not only
+      # where wip is enabled.
+      assertions = [
+        {
+          assertion = !cfg.enable || cfg.host != "";
+          message = "kyle.wip.enable is true but kyle.wip.host is unset.";
+        }
+      ];
+    }
 
-    # NOTE for future edits: this module is imported by users/kyle/home.nix,
-    # which ALL FOUR NixOS hosts import (artemis, atlas, gateway, nixosvm).
-    # Enabling belongs in the per-host layers (home/wsl.nix, home/darwin.nix) —
-    # never here and never in the shared profile, or gateway would end up
-    # snapshotting its own ~/personal and ~/work to itself.
-    home.packages = lib.mkIf cfg.enable [ wip ];
-  };
+    (lib.mkIf cfg.enable {
+      home.packages = [ wip ];
+
+      # Linux (artemis): systemd user timer.
+      #
+      # The mkIf is belt-and-braces — Home Manager declares systemd.user on
+      # every platform (systemd.user.enable itself defaults to isLinux) — but it
+      # keeps the units from being generated on a hypothetical Darwin host that
+      # enabled wip through the shared profile.
+      systemd.user = lib.mkIf pkgs.stdenv.isLinux {
+        services.wip = {
+          Unit.Description = "Snapshot dirty working trees to the sync hub";
+          Service = {
+            Type = "oneshot";
+            ExecStart = "${tick}";
+          };
+        };
+        timers.wip = {
+          Unit.Description = "Run wip every ${toString cfg.interval} minutes";
+          Timer = {
+            # OnStartupSec, NOT OnBootSec. This is the PER-USER manager, which
+            # (on WSL especially) starts at first login, long after boot —
+            # OnBootSec = 2m would already be in the past by then, so the
+            # "settle first" grace period it looks like would not exist.
+            # systemd.timer(5) on OnStartupSec: "primarily useful when
+            # configured in units running in the per-user service manager, as
+            # the user service manager is generally started on first login
+            # only, not already during boot."
+            OnStartupSec = "2m";
+            OnUnitActiveSec = "${toString cfg.interval}m";
+            # No Persistent = true: systemd.timer(5) says it "only has an effect
+            # on timers configured with OnCalendar=", and this timer is purely
+            # monotonic. Nothing is lost by leaving it out — after a suspend the
+            # interval has already elapsed, so OnUnitActiveSec fires on resume.
+            # (OnCalendar is the wrong trade here anyway: it would only divide
+            # the hour evenly for some values of cfg.interval.)
+          };
+          Install.WantedBy = [ "timers.target" ];
+        };
+      };
+
+      # macOS (ariane): launchd agent. mkIf on the VALUE, not around the
+      # attribute — HM declares launchd.agents on every platform, and its
+      # assertion is (launchd.enable && agents != {}) -> isDarwin with
+      # launchd.enable defaulting to isDarwin, so this is belt-and-braces too.
+      launchd.agents.wip = lib.mkIf pkgs.stdenv.isDarwin {
+        enable = true;
+        config = {
+          ProgramArguments = [ "${tick}" ];
+          StartInterval = cfg.interval * 60;
+          RunAtLoad = true;
+          ProcessType = "Background";
+          StandardOutPath = "${stateDir}/agent.log";
+          StandardErrorPath = "${stateDir}/agent.log";
+        };
+      };
+
+      # launchd will not create the parent directory of StandardOutPath, and
+      # RunAtLoad fires the first tick the moment HM bootstraps the agent — so
+      # this has to land BEFORE setupLaunchAgents, not merely after
+      # writeBoundary (both are entryAfter "writeBoundary", i.e. unordered
+      # relative to each other). On Linux setupLaunchAgents does not exist and
+      # HM's dag ignores an edge to an unknown entry, leaving a plain
+      # after-writeBoundary entry.
+      home.activation.wipStateDir =
+        lib.hm.dag.entryBetween [ "setupLaunchAgents" ] [ "writeBoundary" ] ''
+          $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg stateDir} ${lib.escapeShellArg cacheDir}
+        '';
+    })
+  ];
 }
