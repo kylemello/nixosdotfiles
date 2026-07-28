@@ -111,6 +111,80 @@
         '';
       };
 
+      # Hand-written on artemis as ~/.config/fish/functions/q.fish and unknown
+      # to Nix, so it existed on exactly one machine. Moved here verbatim apart
+      # from the platform string, which was hardcoded to "NixOS/WSL2" and is
+      # wrong on macOS.
+      #
+      # Transcription note: inside a Nix indented string a literal `''` must be
+      # written `'''` and a literal `${` must be written `''${`. The original
+      # has two `''` (the empty replacement arguments on the `string replace`
+      # line) and no `${`; both were escaped. `\r`, `\n`, `\033` and the
+      # backticks need no escaping — `\` is not special in a Nix `''` string.
+      q = {
+        description = "AI command suggestion";
+        body = ''
+          # 1. Parse flags: --opus, --haiku (default sonnet)
+          argparse 'opus' 'haiku' -- $argv; or return 1
+
+          # 2. Build query from remaining args, bail if empty
+          set -l query (string join " " $argv)
+          if test -z "$query"
+              echo "Usage: q <describe what you want>" >&2
+              return 1
+          end
+
+          # 3. Select model
+          set -l model sonnet
+          if set -q _flag_opus;  set model opus;  end
+          if set -q _flag_haiku; set model haiku; end
+
+          # 4. Static waiting message (background spinners block claude in fish)
+          printf "  ⠹ thinking...\r" >&2
+
+          # 5. Call Claude
+          set -l system_prompt "You are a command generator for fish shell on ${
+            if pkgs.stdenv.isDarwin then "macOS (nix-managed)" else "NixOS/WSL2"
+          }. Output ONLY the raw shell command. No explanations, no markdown, no backticks, no code blocks. If multiple commands are needed, join with && or ; on one line."
+          set -l response (claude -p --model $model --effort low --tools "" --no-session-persistence --system-prompt "$system_prompt" "$query" 2>/dev/null)
+          set -l exit_code $status
+
+          # 6. Clear waiting message
+          printf "\r\033[K" >&2
+
+          # 7. Error handling
+          if test $exit_code -ne 0; or test -z "$response"
+              set_color red >&2; echo "  Error getting suggestion" >&2; set_color normal >&2
+              return 1
+          end
+
+          # 8. Strip formatting (code blocks, backticks)
+          if string match -rq '^```' $response[1]
+              set response $response[2..-2]
+          end
+          set -l cmd (string join "\n" $response | string replace -r '^\`' ''' | string replace -r '\`$' ''' | string trim)
+
+          # 9. Display command
+          echo >&2
+          echo "  "(set_color bryellow)$cmd(set_color normal) >&2
+          echo >&2
+
+          # 10. Prompt: single keypress, no Enter needed
+          read -l -P "  "(set_color brblack)"(r)un  (c)opy  (n)ope "(set_color normal) -n 1 action
+
+          switch $action
+              case r y
+                  echo >&2
+                  eval $cmd
+              case c
+                  printf '%s' $cmd | fish_clipboard_copy
+                  echo "  Copied." >&2
+              case '*'
+                  echo "  Cancelled." >&2
+          end
+        '';
+      };
+
       fish_prompt = ''
         set -l last_status $status
         set -l normal (set_color normal)

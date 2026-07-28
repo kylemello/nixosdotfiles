@@ -36,6 +36,7 @@
     pnpm
     ruby
     rustc
+    sqlc # was a `go install` into ~/go/bin on artemis only
     sqlite
     tea
     terraform
