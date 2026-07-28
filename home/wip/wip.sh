@@ -190,7 +190,7 @@ wip_manifest_path() { printf '%s/_manifest/%s.tsv' "$WIP_REMOTE_PATH" "$1"; }
 # leave the hub's copy of this host's census stale without any signal, and
 # `wip clone` trusts that census as ground truth for what exists here.
 wip_manifest_write() {
-  local repo slug url rel dirty head out
+  local repo slug url rel dirty head out remote_dest remote_tmp
   if ! out="$(mktemp "${TMPDIR:-/tmp}/wip-man.XXXXXX")"; then
     printf 'wip: manifest: mktemp failed, not publishing\n' >&2
     return 1
@@ -212,13 +212,33 @@ wip_manifest_write() {
       return 1
     fi
   else
+    # Two SEPARATE ssh calls, not one command chained with `&&` on the
+    # remote side. A dropped connection can leave the remote shell having
+    # received only part of $out -- but whether the remote side treats that
+    # as a clean EOF or gets killed outright, the LOCAL ssh client here
+    # (which is still trying to send the rest of $out into a dead channel)
+    # reliably reports non-zero either way. Gating the `mv` on THAT exit
+    # status, in our own code rather than a remote `&&`, means a failed
+    # transfer can never reach the rename step: it lands in a discardable
+    # remote_tmp, never in remote_dest, so the previous good manifest
+    # survives untouched. (Regression: streaming straight into remote_dest
+    # via `cat > remote_dest` left the hub holding a truncated census after
+    # exactly this kind of failure.)
+    remote_dest="$(wip_manifest_path "$WIP_HOST")"
+    remote_tmp="$remote_dest.$$.tmp"
     if ! ssh "$WIP_REMOTE_HOST" \
-        "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$(wip_manifest_path "$WIP_HOST")'" < "$out"; then
+        "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$remote_tmp'" < "$out"; then
       printf 'wip: manifest: hub unreachable, not published\n' >&2
       rm -f "$out"
+      ssh "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
       return 1
     fi
     rm -f "$out"
+    if ! ssh "$WIP_REMOTE_HOST" "mv '$remote_tmp' '$remote_dest'"; then
+      printf 'wip: manifest: hub unreachable, not published\n' >&2
+      ssh "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
+      return 1
+    fi
   fi
 }
 

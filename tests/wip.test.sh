@@ -49,6 +49,42 @@ SPY
   return "$rc"
 }
 
+# Spy on ssh invocations made by "$@", simulating a connection that dies
+# mid-transfer: forwards only the first $2 bytes of stdin into the (locally
+# standing-in-for-remote) command, then reports failure regardless of that
+# command's own exit status -- exactly what a dropped network connection
+# looks like to the caller: the remote command may complete "successfully"
+# based on truncated input, but the LOCAL ssh client, having failed to send
+# the rest of $out into a now-dead channel, still reports non-zero. Used to
+# prove wip_manifest_write's ssh publish path is atomic: a partial transfer
+# must never reach the manifest's real destination, only a discardable
+# remote_tmp that gets cleaned up.
+#
+# Same /tmp-rooted mktemp template as spy_git, for the same reason: callers
+# may deliberately break TMPDIR for the subject under test.
+spy_ssh_partial() {
+  local logfile="$1" bytes="$2"; shift 2
+  local spydir rc
+  spydir="$(mktemp -d "/tmp/wip-sshspy.XXXXXXXXXX")" || {
+    printf 'spy_ssh_partial: mktemp failed, cannot install shim\n' >&2
+    return 1
+  }
+  cat > "$spydir/ssh" <<SPY
+#!/usr/bin/env bash
+# \$1 = remote host (ignored -- these tests stand a local directory in for
+# the hub), \$2 = the remote command string.
+printf '%s\n' "\$2" >> "$logfile"
+head -c $bytes | bash -c "\$2"
+exit 1
+SPY
+  chmod +x "$spydir/ssh"
+  : > "$logfile"
+  ( PATH="$spydir:$PATH" "$@" )
+  rc=$?
+  rm -rf "$spydir"
+  return "$rc"
+}
+
 setup() {
   SANDBOX="$(mktemp -d)"
   export HOME="$SANDBOX/home"
@@ -193,15 +229,87 @@ teardown
 
 # --- manifest ----------------------------------------------------------------
 setup
+# A second repo that stays genuinely clean, alongside $REPO which is made
+# dirty below -- both recorded in the SAME wip_manifest_write run, so the
+# dirty=0/dirty=1 split proves the field is computed per-repo rather than a
+# constant. (Regression: hardcoding dirty=1 for every repo left the old,
+# single-repo version of this test passing.)
+REPO2="$HOME/work/demo2"
+mkdir -p "$REPO2"
+git -C "$REPO2" init -q -b main
+git -C "$REPO2" config user.email t@t; git -C "$REPO2" config user.name t
+git -C "$REPO2" remote add origin https://github.com/acme/Clean-App.git
+printf 'v1\n' > "$REPO2/tracked.txt"
+git -C "$REPO2" add -A; git -C "$REPO2" commit -qm init
+
 printf 'dirty\n' > "$REPO/tracked.txt"
 wip_manifest_write
 MAN="$WIP_REMOTE_PATH/_manifest/testhost.tsv"
 check "manifest: written" "$([ -f "$MAN" ] && echo yes || echo no)" "yes"
-check "manifest: one line per repo" "$(wc -l < "$MAN" | tr -d ' ')" "1"
+check "manifest: one line per repo" "$(wc -l < "$MAN" | tr -d ' ')" "2"
 check "manifest: records origin" \
-  "$(cut -f2 "$MAN")" "https://github.com/acme/Demo-App.git"
-check "manifest: records rel path" "$(cut -f3 "$MAN")" "work/demo"
-check "manifest: marks dirty" "$(cut -f4 "$MAN")" "1"
+  "$(awk -F'\t' -v s="$(wip_slug "$REPO")" '$1==s{print $2}' "$MAN")" \
+  "https://github.com/acme/Demo-App.git"
+check "manifest: records rel path" \
+  "$(awk -F'\t' -v s="$(wip_slug "$REPO")" '$1==s{print $3}' "$MAN")" \
+  "work/demo"
+check "manifest: dirty repo recorded dirty=1" \
+  "$(awk -F'\t' -v s="$(wip_slug "$REPO")" '$1==s{print $4}' "$MAN")" "1"
+check "manifest: clean repo recorded dirty=0" \
+  "$(awk -F'\t' -v s="$(wip_slug "$REPO2")" '$1==s{print $4}' "$MAN")" "0"
+teardown
+
+# --- manifest: read ------------------------------------------------------
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_manifest_write
+MAN_CONTENT="$(cat "$WIP_REMOTE_PATH/_manifest/testhost.tsv")"
+
+check "manifest read: returns the published host's census" \
+  "$(wip_manifest_read testhost)" "$MAN_CONTENT"
+
+MAN_READ_OUT="$(wip_manifest_read nosuchhost)"; MAN_READ_RC=$?
+check "manifest read: unpublished host returns empty output" "$MAN_READ_OUT" ""
+check "manifest read: unpublished host exits zero" "$MAN_READ_RC" "0"
+teardown
+
+# --- manifest: ssh publish is atomic --------------------------------------
+# Regression test for: wip_manifest_write's ssh branch used to stream
+# straight into the live manifest path (`cat > <dest>`). A connection that
+# died mid-transfer left the hub holding a truncated census where a
+# complete one belonged. The fix splits the publish into two ssh calls --
+# write to a remote temp path, then a SEPARATE `mv` attempted only if that
+# write reported success -- so a failed first call, for any reason
+# (including a connection that dies after forwarding only part of the
+# data), never reaches the second: the hub keeps whatever it had before.
+setup
+REPO2="$HOME/work/demo2"
+mkdir -p "$REPO2"
+git -C "$REPO2" init -q -b main
+git -C "$REPO2" config user.email t@t; git -C "$REPO2" config user.name t
+git -C "$REPO2" remote add origin https://github.com/acme/Second-App.git
+printf 'v1\n' > "$REPO2/tracked.txt"
+git -C "$REPO2" add -A; git -C "$REPO2" commit -qm init
+
+wip_manifest_write   # good baseline, over the real (local-hub) path
+MAN="$WIP_REMOTE_PATH/_manifest/testhost.tsv"
+GOOD_MANIFEST="$(cat "$MAN")"
+
+# Force the NEXT write's content to differ from the good baseline, so a
+# leaked truncated/partial write would be visibly detectable, not
+# coincidentally identical to what was already there.
+printf 'dirty again\n' > "$REPO/tracked.txt"
+(
+  export WIP_LOCAL_HUB=0
+  spy_ssh_partial "$SANDBOX/ssh-calls.log" 10 wip_manifest_write
+)
+ATOMIC_FAIL_RC=$?
+
+check "manifest atomicity: failed ssh publish returns non-zero" "$ATOMIC_FAIL_RC" "1"
+check "manifest atomicity: hub keeps the previous complete manifest" \
+  "$(cat "$MAN")" "$GOOD_MANIFEST"
+check "manifest atomicity: no orphaned temp file" \
+  "$(compgen -G "$MAN.*.tmp" 2>/dev/null | wc -l | tr -d ' ')" "0"
 teardown
 
 # --- shadow fetch ------------------------------------------------------------
