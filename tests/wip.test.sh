@@ -604,5 +604,60 @@ check "ssh: the failed-publish cleanup goes through WIP_SSH too" \
 unset WIP_SSH
 teardown
 
+# --- an unresolvable WIP_SSH is a misconfiguration, not a sleeping hub --------
+# The failure this pins down: `ssh.exe` is a bare name that only reaches PATH via
+# home.sessionPath, which a systemd user unit never sources. The probe's stderr
+# goes to /dev/null (an absent LAN-only hub is normal and must stay quiet), and
+# that also swallowed the shell's "command not found" -- so `wip push --all`
+# exited 0 with NO output and the timer pushed nothing, silently, forever.
+# It passes by hand, because an interactive shell does resolve ssh.exe.
+setup
+export WIP_LOCAL_HUB=0            # take the ssh path, not the local-directory one
+
+MISSING_ERR="$SANDBOX/missing.err"
+( export WIP_SSH="definitely-not-a-real-ssh-binary"; wip_hub_up ) 2>"$MISSING_ERR"
+MISSING_STATUS=$?
+# Status 127 alone is NOT the fix -- the old code already returned it, and the
+# caller swallowed it anyway. Pinned so the exit path keeps reporting it; the
+# next assertion is the one that flips.
+check "ssh-missing: wip_hub_up surfaces the shell's 127" \
+  "$MISSING_STATUS" "127"
+check "ssh-missing: the diagnostic names the command that would not resolve" \
+  "$(grep -c 'definitely-not-a-real-ssh-binary' "$MISSING_ERR")" "1"
+
+# The other half of the distinction, and the anti-regression for the fix above:
+# a hub that is merely ASLEEP must stay silent and must NOT abort. 255 is what
+# real ssh returns when it cannot connect.
+cat > "$SANDBOX/ssh-unreachable" <<'STUB'
+#!/usr/bin/env bash
+exit 255
+STUB
+chmod +x "$SANDBOX/ssh-unreachable"
+ASLEEP_ERR="$SANDBOX/asleep.err"
+( export WIP_SSH="$SANDBOX/ssh-unreachable"; wip_hub_up ) 2>"$ASLEEP_ERR"
+ASLEEP_STATUS=$?
+check "ssh-missing: an unreachable hub still returns non-zero" "$ASLEEP_STATUS" "255"
+check "ssh-missing: an unreachable hub stays quiet (no diagnostic)" \
+  "$(wc -c <"$ASLEEP_ERR" | tr -d ' ')" "0"
+
+# End to end through the dispatcher, run exactly as the generated binary runs it
+# (`set -euo pipefail`, both files sourced, argv on the source line) and exactly
+# as the timer invokes it. Asserting on wip_hub_up alone would not have caught
+# this: the silence came from wip_cmd_push's `wip_hub_up || return 0`.
+PUSH_OUT="$(
+  ( set -euo pipefail
+    export WIP_SSH="definitely-not-a-real-ssh-binary"
+    # shellcheck source=/dev/null
+    source "$HERE/../home/wip/wip.sh"
+    # shellcheck source=/dev/null
+    source "$HERE/../home/wip/main.sh" push --all ) 2>&1
+)"
+PUSH_STATUS=$?
+check "ssh-missing: \`wip push --all\` exits non-zero instead of a silent 0" \
+  "$PUSH_STATUS" "127"
+check "ssh-missing: \`wip push --all\` says why instead of printing nothing" \
+  "$(printf '%s\n' "$PUSH_OUT" | grep -c 'no such command on PATH')" "1"
+teardown
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

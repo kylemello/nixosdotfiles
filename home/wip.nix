@@ -7,12 +7,31 @@ let
   # directly testable (see tests/wip.test.sh).
   wip = pkgs.writeShellScriptBin "wip" ''
     set -euo pipefail
-    export PATH="${lib.makeBinPath (with pkgs; [ git openssh coreutils findutils gnused ])}:$PATH"
+    # config.home.sessionPath is appended because this script runs in contexts
+    # that never source hm-session-vars.sh — above all the systemd user timer,
+    # whose unit has no Environment=PATH. On artemis `ssh.exe` is a bare command
+    # name living under /mnt/c/…/OpenSSH/, and hosts/wsl.nix sets
+    # wsl.interop.includePath = false, so home.sessionPath is its ONLY source.
+    # Without this the timer resolves nothing, wip_hub_up reads the shell's 127
+    # as "hub away", and the timer pushes nothing and logs nothing every 5
+    # minutes — while `wip push` typed by hand still works, because an
+    # interactive shell does have the directory.
+    export PATH="${lib.concatStringsSep ":" (
+      [ (lib.makeBinPath (with pkgs; [ git openssh coreutils findutils gnused ])) ]
+      ++ config.home.sessionPath
+    )}:$PATH"
 
     export WIP_HOST=${lib.escapeShellArg cfg.host}
     export WIP_REMOTE_HOST=${lib.escapeShellArg cfg.remoteHost}
     export WIP_REMOTE_PATH=${lib.escapeShellArg cfg.remotePath}
     export WIP_ROOTS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.roots)}
+    # Pinned, not left ambient: this is the one contract variable wip.sh reads
+    # with a bare-environment fallback, and its own comment explains the cost of
+    # getting it wrong — artemis's $HOME is /home/kyle and WIP_REMOTE_PATH is
+    # /home/kyle/wip, so a stray WIP_LOCAL_HUB=1 would make artemis snapshot to
+    # itself instead of gateway, with nothing surfacing the mistake. 0 = real
+    # ssh hub; only tests/wip.test.sh sets 1.
+    export WIP_LOCAL_HUB=0
     # Resolved HERE, from the Nix layer, rather than with a shell
     # ''${XDG_CACHE_HOME:-$HOME/.cache} fallback: the timer (Task 7) names the
     # very same directories in its activation script and launchd log paths, and
@@ -95,11 +114,21 @@ in
         reach it. Getting this wrong makes every push fail authentication
         silently, visible only in the timer's journal.
 
-        Must be an OpenSSH-CLI-compatible command: `wip_hub_up` appends
-        `-o BatchMode=yes -o ConnectTimeout=3
-        -o StrictHostKeyChecking=accept-new` after it, and GIT_SSH_COMMAND
-        appends `-o BatchMode=yes -o ConnectTimeout=5`. `ssh.exe` (Windows
-        OpenSSH) accepts all of these.
+        Three constraints on the value:
+
+        1. OpenSSH-CLI-compatible: `wip_hub_up` appends `-o BatchMode=yes
+           -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new` after it,
+           and GIT_SSH_COMMAND appends `-o BatchMode=yes -o ConnectTimeout=5`.
+           `ssh.exe` (Windows OpenSSH) accepts all of these.
+        2. A bare binary, NO arguments. git shell-parses GIT_SSH_COMMAND, but
+           wip.sh invokes "''${WIP_SSH:-ssh}" as a single quoted word — so a
+           value with flags in it would work in git and break every direct ssh
+           call site.
+        3. Resolvable from a NON-INTERACTIVE PATH. The timer is a systemd user
+           unit with no Environment=PATH, so it never sees hm-session-vars.sh.
+           A bare name like `ssh.exe` only works because the wrapper appends
+           config.home.sessionPath to its own PATH; an absolute path is always
+           safe.
       '';
       example = "ssh.exe";
     };

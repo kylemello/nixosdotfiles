@@ -68,8 +68,35 @@ wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
 # overlapping runs would pile up.
 wip_hub_up() {
   wip_local_hub && return 0
-  "${WIP_SSH:-ssh}" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
-      "$WIP_REMOTE_HOST" true 2>/dev/null
+  local ssh="${WIP_SSH:-ssh}" status=0
+  # `|| status=$?` rather than a bare call plus `$?`: this must read the same
+  # under `set -e` no matter how the caller invoked us.
+  "$ssh" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+      "$WIP_REMOTE_HOST" true 2>/dev/null || status=$?
+
+  # A sleeping hub and an unresolvable ssh binary MUST NOT look alike.
+  #
+  # The probe above sends its stderr to /dev/null, because a LAN-only hub being
+  # away is the normal case and must stay quiet. That redirection also swallows
+  # the SHELL's own "command not found", so a misconfigured WIP_SSH used to
+  # arrive here as a plain non-zero and be reported as "hub away" -- measured:
+  # `wip push --all` exited 0 with no output at all, so the timer would push
+  # nothing and log nothing, every 5 minutes, forever. It survives manual
+  # testing too: `ssh.exe` resolves in an interactive fish (home.sessionPath)
+  # but not in a systemd user unit, which is where the timer runs.
+  #
+  # 127 is the shell's command-not-found status, but ssh also exits 127 when the
+  # REMOTE command does, so confirm with `command -v` before blaming the config.
+  if [ "$status" -eq 127 ] && ! command -v "$ssh" >/dev/null 2>&1; then
+    printf 'wip: WIP_SSH=%s: no such command on PATH\n' "$ssh" >&2
+    printf 'wip: that is a misconfiguration, not a sleeping hub — aborting.\n' >&2
+    # `exit`, not `return`: every caller treats a non-zero wip_hub_up as "hub
+    # away, retry next tick" and deliberately swallows it, so a return value
+    # would be laundered straight back into the silence this exists to prevent.
+    # No operation in this run can succeed without a working ssh.
+    exit 127
+  fi
+  return "$status"
 }
 
 wip_push_target() {

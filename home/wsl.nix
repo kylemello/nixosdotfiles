@@ -48,6 +48,13 @@
     roots = [ "personal" "work" ];
     # The Windows-side 1Password agent serves this host's keys; Nix's openssh
     # cannot reach it. Without this every wip push fails auth silently.
+    #
+    # This bare name resolves ONLY through home.sessionPath above
+    # (hosts/wsl.nix sets wsl.interop.includePath = false), which nothing
+    # non-interactive sources — so home/wip.nix appends home.sessionPath to the
+    # wrapper's own PATH. Keep that in place or the systemd timer silently
+    # resolves nothing. If ssh.exe ever moves out of the two OpenSSH
+    # directories listed above, add the new one there.
     sshCommand = "ssh.exe";
   };
 }
