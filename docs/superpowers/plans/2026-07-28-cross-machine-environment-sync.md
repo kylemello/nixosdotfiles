@@ -1801,6 +1801,16 @@ The jq deep-merge makes this safe to apply to a host that already has some of
 them — verified on artemis, where activation added `personal` while leaving
 `git`, `kubernetes` and `atlassian-aegis` untouched.
 
+**On `atlassian-aegis` specifically:** the `dev-plugins` repo *documents* it as a
+manual prerequisite but does not declare it. `dev-plugins/README.md:19` tells you
+to run `claude mcp add --transport http --scope user atlassian-aegis ...`, and
+`aegis-jira/skills/creating-adt-tickets/SKILL.md:16,22` hard-depends on a server
+by that name. Declaring it here replaces that manual step. Note it does **not**
+remove the one-time interactive auth — `/mcp` → authenticate → select the
+`aegistherapies` site — which is per-host regardless, same as `personal`.
+Optionally simplify `dev-plugins/README.md` afterward to point at the flake
+instead of the `claude mcp add` line; that is a commit to that repo, not this one.
+
 Confirm afterward that both hosts agree:
 ```bash
 jq -S '.mcpServers | keys' ~/.claude.json
