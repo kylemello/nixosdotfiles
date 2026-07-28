@@ -1490,7 +1490,9 @@ In `users/kyle/home.nix` and `users/kyle/ariane.nix`, add to `imports`:
     ../../home/wip.nix
 ```
 
-and add to each profile body:
+That is ALL that goes in the shared profiles — the import only, so the options
+exist. Then enable per-host, in `home/wsl.nix` (artemis) and `home/darwin.nix`
+(ariane):
 
 ```nix
   kyle.wip = {
@@ -1499,8 +1501,7 @@ and add to each profile body:
   };
 ```
 
-**Put that block in `home/wsl.nix` and `home/darwin.nix`, NOT in
-`users/kyle/home.nix`.** The shared profile is imported by all four NixOS hosts, so
+**Never in `users/kyle/home.nix`.** The shared profile is imported by all four NixOS hosts, so
 enabling there would put `wip` on atlas, nixosvm, and gateway — and gateway would
 snapshot its own copies of `~/personal`/`~/work` to itself. Import
 `../../home/wip.nix` from both user profiles so the options exist; enable per-host.
