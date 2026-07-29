@@ -26,15 +26,60 @@ wip_slug() {
   local repo="$1" url
   url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
   if [ -n "$url" ]; then
-    printf '%s' "$url" \
-      | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:#/#; s#\.git$##' \
-      | tr '[:upper:]' '[:lower:]' \
-      | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##'
+    wip_slug_normalize "$url"
   else
     printf '%s' "${repo#"$HOME"/}" \
       | tr '[:upper:]' '[:lower:]' \
       | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##'
   fi
+}
+
+# The normalisation half of wip_slug, over a bare STRING rather than a repo on
+# disk. Split out for `wip forget`, which has to derive a slug when the repo has
+# ALREADY been deleted -- which is the usual case, since cleaning up after a
+# deleted repo is the whole point of that verb.
+#
+# Only wip_slug's URL branch delegates here, and the path branch deliberately
+# does NOT: this pipeline strips a trailing `.git`, so a repo DIRECTORY named
+# `foo.git` would change slug and stop pairing with the snapshot already on the
+# hub. The two branches have always differed in exactly that one way; folding
+# them together would silently re-slug deployed repos.
+wip_slug_normalize() {
+  printf '%s' "$1" \
+    | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:#/#; s#\.git$##' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##'
+}
+
+# A slug from whatever `wip forget` was handed: a slug, a path, or a URL.
+#
+# A LIVE repo on disk is resolved through wip_slug, not normalised as a string,
+# and that ordering matters: `wip forget ~/work/demo` on a repo whose origin is
+# github.com/acme/Demo-App has to give `github-com-acme-demo-app`, where the
+# string alone would give `work-demo` -- a slug the hub has never heard of.
+#
+# Everything else goes through wip_slug_normalize, which is a no-op on something
+# that is already a slug (lowercase [a-z0-9-], no scheme, no `@`, no `:`, no
+# `.git` suffix), so the ordinary `wip forget <slug>` passes through untouched.
+# Guessing is bounded by the CALLER, not here: a value that normalises to
+# something the hub does not hold and that has nothing local is reported as
+# such, never acted on.
+wip_slug_from_arg() {
+  local arg="$1" top s
+  # `git -C ""` is a documented NO-OP rather than an error, so an empty argument
+  # would fall through to the branch below and resolve the CURRENT repo -- a
+  # silently wrong answer from the one function whose job is to name what is
+  # about to be deleted. wip_cmd_forget routes an empty argument to its own cwd
+  # branch before ever calling this, so this is belt-and-braces for a future
+  # caller that does not.
+  [ -n "$arg" ] || return 0
+  if top="$(git -C "$arg" rev-parse --show-toplevel 2>/dev/null)" && [ -n "$top" ]; then
+    wip_slug "$top"
+    return 0
+  fi
+  s="${arg%/}"          # a trailing slash, as shell tab-completion leaves it
+  s="${s#"$HOME"/}"     # ~/work/foo -> work/foo, as wip_slug's path branch does
+  wip_slug_normalize "$s"
 }
 
 # Print the absolute path of every git repo under the configured roots.
@@ -296,6 +341,73 @@ wip_ensure_bare() {
   mkdir -p "$WIP_STATE"; : > "$flag"
 }
 
+# Every slug the hub holds a bare snapshot repo for, one per line.
+#
+# ONE round trip for the whole hub. `wip forget --list` cross-references this
+# against both censuses, and a per-slug probe would be the same mistake
+# wip_cmd_fetch_all in main.sh exists to undo.
+#
+# `ls` of the DIRECTORY plus a suffix test here, rather than a remote
+# `ls -d '$WIP_REMOTE_PATH'/*.git`: an unmatched glob comes back as the literal
+# pattern, so a hub holding nothing yet would report a repo named `*` -- which
+# `wip forget` would then offer to delete. The suffix test also drops
+# `_manifest/`, which is a directory on the hub but not a snapshot repo.
+wip_hub_slugs() {
+  local out line
+  if wip_local_hub; then
+    out="$(ls -1 "$WIP_REMOTE_PATH" 2>/dev/null || true)"
+  else
+    out="$(wip_hub_ssh "$WIP_REMOTE_HOST" "ls -1 '$WIP_REMOTE_PATH' 2>/dev/null" || true)"
+  fi
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in *.git) printf '%s\n' "${line%.git}" ;; esac
+  done <<< "$out"
+}
+
+# What snapshots the hub's bare repo for a slug still holds: one
+# "<host><TAB><unix-time>" line per refs/heads/wip/<host>.
+#
+# ONE round trip, and only on `wip forget`'s destructive path -- `--list` never
+# pays for it.
+#
+# This is not decoration. Once BOTH machines have deleted a repo, the hub's bare
+# repo is the only place its uncommitted work still exists: no working tree has
+# it, no shadow cache is refreshed for it, `wip undo` cannot reach it, and
+# nothing was ever committed. Deleting it is final. Measured against the live hub
+# on 2026-07-28: all three of its orphans still held a 4-hour-old snapshot, so
+# this is the ordinary case for an orphan rather than a corner of it.
+#
+# `%09` rather than a literal tab in the format string, so the value survives
+# being interpolated into a remote shell command.
+wip_hub_snapshots() {
+  local slug="$1" fmt='%(refname:strip=3)%09%(committerdate:unix)'
+  if wip_local_hub; then
+    git --git-dir="$WIP_REMOTE_PATH/$slug.git" for-each-ref \
+      --format="$fmt" refs/heads/wip/ 2>/dev/null || true
+  else
+    wip_hub_ssh "$WIP_REMOTE_HOST" \
+      "git --git-dir='$WIP_REMOTE_PATH/$slug.git' for-each-ref --format='$fmt' refs/heads/wip/ 2>/dev/null" \
+      || true
+  fi
+}
+
+# Delete one bare snapshot repo from the hub.
+#
+# Through wip_hub_ssh like every other hub operation -- see its header for why a
+# bare `ssh` here costs a whole extra handshake. The slug is validated as
+# [a-z0-9-] by wip_cmd_forget BEFORE this is reached, and that validation is
+# what makes interpolating it into a remote `rm -rf` safe; nothing else may call
+# this with an unvalidated value.
+wip_hub_rm_repo() {
+  local slug="$1"
+  if wip_local_hub; then
+    rm -rf "$WIP_REMOTE_PATH/$slug.git"
+  else
+    wip_hub_ssh "$WIP_REMOTE_HOST" "rm -rf '$WIP_REMOTE_PATH/$slug.git'"
+  fi
+}
+
 # Snapshot one repo's working tree to the hub.
 #
 # Builds the tree through a TEMPORARY index so the real .git/index is never
@@ -540,6 +652,89 @@ wip_manifest_snapshot_slugs() {
     [ "$dirty" = "1" ] || continue
     printf '%s\n' "$slug"
   done < <(wip_manifest_read "$host")
+}
+
+# --- who still has what -------------------------------------------------------
+#
+# `wip forget` has to answer one question -- "does a live repo still correspond
+# to this bare repo on the hub?" -- across three populations at once: this
+# machine, the other machine, and the hub itself. The two functions below reduce
+# the first two to one common shape, "<slug>\t<$HOME-relative path>", so a
+# single pair of lookups serves both. Each population is read EXACTLY ONCE per
+# `wip forget`, never once per slug.
+
+# A census blob (as wip_manifest_read returns it) reduced to that shape.
+#
+# The SLUG is emitted for every row with a non-empty first field, INCLUDING a
+# malformed one; only the PATH is gated on the full five columns. That asymmetry
+# is deliberate and it points the safe way. The slug set is what decides whether
+# a hub repo counts as orphaned -- i.e. whether `wip forget` will offer to
+# DELETE it -- so a row this parser cannot fully read must still count as "that
+# repo exists"; dropping it would make a live repo look deletable. The path is
+# only ever displayed, and peeling past the end of a short row leaves the string
+# unchanged, which would print the url as if it were the path.
+#
+# Peeled by parameter expansion and NOT `IFS=$'\t' read -r slug url rel ...`:
+# TAB is one of the shell's IFS *whitespace* characters, so a run of tabs
+# collapses into a single delimiter, and the url column is empty for every repo
+# with no `origin`. Same trap and the same fix as wip_manifest_snapshot_slugs
+# above and wip_missing in main.sh; all three have to stay consistent.
+wip_census_index() {
+  local blob="$1" line slug rest
+  [ -n "$blob" ] || return 0
+  while IFS= read -r line; do
+    slug="${line%%$'\t'*}"
+    [ -n "$slug" ] || continue
+    case "$line" in
+      *$'\t'*$'\t'*$'\t'*$'\t'*)
+        rest="${line#*$'\t'}"          # url onward
+        rest="${rest#*$'\t'}"          # rel onward
+        printf '%s\t%s\n' "$slug" "${rest%%$'\t'*}" ;;
+      *) printf '%s\t\n' "$slug" ;;
+    esac
+  done <<< "$blob"
+}
+
+# The same shape for THIS machine, computed from the filesystem rather than from
+# our own census on the hub.
+#
+# Not a shortcut for reading our own manifest, and not interchangeable with it.
+# That manifest is only as fresh as the last tick that actually reached the hub,
+# and wip_manifest_write deliberately OMITS any repo whose `git status` failed.
+# Either gap would show a repo sitting right here as an orphan -- and orphans are
+# what `wip forget` deletes.
+wip_local_index() {
+  local repo
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    printf '%s\t%s\n' "$(wip_slug "$repo")" "${repo#"$HOME"/}"
+  done < <(wip_repos)
+}
+
+# Just the slugs of such an index.
+wip_index_slugs() {
+  local index="$1" line
+  [ -n "$index" ] || return 0
+  while IFS= read -r line; do
+    [ -n "${line%%$'\t'*}" ] && printf '%s\n' "${line%%$'\t'*}"
+  done <<< "$index"
+  return 0
+}
+
+# The path recorded for one slug in such an index. Prints it -- possibly empty --
+# and returns 0 when the slug is PRESENT; returns 1 when it is absent. Presence
+# and path are different questions, and a repo with no recorded path must not
+# read as an absent one: that is the difference between refusing to delete the
+# other machine's live repo and deleting it.
+wip_index_path() {
+  local slug="$1" index="$2" line
+  [ -n "$index" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "$slug"$'\t'*) printf '%s' "${line#*$'\t'}"; return 0 ;;
+    esac
+  done <<< "$index"
+  return 1
 }
 
 # Pull the other host's snapshot into a shadow repo under $WIP_CACHE. The real

@@ -12,7 +12,7 @@ never touches your branches. Committed work still travels by `git push`/`pull`.
 
 **It never modifies your repository.** No added remotes, no added refs, no
 touched `HEAD`, index, or working tree. That is the one hard requirement the
-design exists to satisfy, and 174 assertions enforce it. The single exception is
+design exists to satisfy, and 214 assertions enforce it. The single exception is
 `wip pull`, which is the whole point of `wip pull` — and it saves your previous
 state first.
 
@@ -27,9 +27,11 @@ wip pull      apply them to your working tree
 wip undo      reverse the last pull
 wip clone     fetch repos that exist on only one machine
 wip push      snapshot now (the timer does this every 5 min anyway)
+wip forget    retire a repo's hub snapshot and local caches (run `--list` first)
 ```
 
-Every verb derives its repo from `$PWD`. No repo argument, no host argument.
+Every verb derives its repo from `$PWD`. No host argument, and no repo argument
+either — except `wip forget`, which usually has no repo left to derive from.
 
 ## Normal use
 
@@ -100,6 +102,69 @@ per machine per repo, as you already do.
 The safety ref lives in `refs/wip-safety/`, not `refs/wip/`, because
 `fetch --prune` on `refs/wip/*` was deleting it — so `wip undo` used to stop
 working within 5 minutes of any pull.
+
+## Retiring a repo — `wip forget`
+
+Deleting a repo locally stops its snapshots (the tool only walks what exists)
+and drops it from the manifest on the next tick. Three things are left behind,
+and until this verb existed nothing ever collected them:
+
+```
+gateway:/home/kyle/wip/<slug>.git          the bare snapshot repo
+~/.cache/wip/<slug>.git                    the local shadow cache
+~/.local/state/wip/<slug>.{tree,created}   the markers
+```
+
+```
+wip forget --list     what has accumulated; changes nothing
+wip forget <slug>     retire one — the usual form, since the folder is gone
+wip forget            in a repo: retire this one
+```
+
+`--list` cross-references the hub's `*.git` against **both** machines'
+manifests *and* the repos actually on this disk, and names what matches
+nothing. On 2026-07-28 that was 3 of 23. The local walk is not redundant with
+our own manifest: that manifest is only as fresh as the last tick that reached
+the hub, and it omits any repo whose `git status` failed — either gap would
+show a repo sitting right here as deletable.
+
+An argument may be a slug, a path or an origin URL; all three normalise the same
+way `wip_slug` does. A path to a *live* repo is resolved through its origin, not
+its name. Anything that normalises to a slug the hub has never held is reported
+as such rather than guessed at.
+
+Three things it tells you, each of which matters more than the deletion:
+
+**It refuses when the other machine still has the repo.** That machine's next
+tick would recreate the hub repo within five minutes, so deleting achieves
+nothing. Delete the repo there first. `--force` overrides.
+
+**It warns when the hub repo still holds a snapshot.** Once *both* machines have
+deleted the repo, the hub's bare repo is the only copy of that uncommitted work
+— nothing was committed, no shadow cache is refreshed for it, and `wip undo`
+cannot reach it. Deleting is final. All three orphans found on 2026-07-28 were
+in exactly this state, each holding a snapshot four hours old.
+
+**It cannot reach the other machine.** It cleans this machine's cache and
+markers and the hub's bare repo. The other machine's cache and markers are its
+own; run `wip forget <slug>` there too. It says so every time.
+
+It never touches the repository itself, even run from inside one.
+
+### Orphans nobody created by deleting anything
+
+The slug *is* the identity, so anything that changes the slug orphans the old
+one on the spot while the repo carries on working normally:
+
+- **the origin URL changes** — one of the three orphans found on 2026-07-28 was
+  this, a repo moved from `github.com/lakr233/…` to `gitea.kmello.dev/kylemello/…`,
+  leaving `github-com-lakr233-gitlab-license-generator.git` behind holding its
+  last pre-move snapshot;
+- **an origin-less repo moves directory**, since its slug is the path.
+
+Same mechanism as the rename warning under "Why folder names don't matter" —
+and the reason `--list` is worth running occasionally even when you have not
+deleted anything.
 
 ---
 
@@ -175,8 +240,8 @@ overwritten by each pull — it recovers the *last* pull, not a history.
 ## Diagnosing by hand
 
 ```bash
-# what the hub holds
-ssh gateway 'ls /home/kyle/wip/*.git | wc -l'
+# what the hub holds, and what on it no longer matches a repo on either machine
+wip forget --list
 ssh gateway 'cat /home/kyle/wip/_manifest/artemis.tsv'   # slug|url|path|dirty|head
 
 # this repo's slug and shadow cache

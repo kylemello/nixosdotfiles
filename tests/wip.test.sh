@@ -1493,5 +1493,203 @@ check "stamp: a corrupt stamp reads as never-contacted" \
 unset WIP_SSH
 teardown
 
+# --- `wip forget` ------------------------------------------------------------
+# Deleting a repo stops its snapshots and drops it from the census, but leaves
+# three things with nothing to collect them: the hub's bare repo, this machine's
+# shadow cache, and this machine's markers. Measured on the live hub 2026-07-28:
+# 23 bare repos, 3 matching no repo on either machine.
+#
+# The fixture below is that hub in miniature -- four bare repos covering each
+# way a slug can be live or not -- so `--list` has something to get wrong in
+# both directions. (main.sh was sourced above.)
+setup
+ORPHAN=github-com-acme-gone-app
+THEIRS=github-com-acme-theirs-app
+DEMO="$(wip_slug "$REPO")"
+
+# demo2 is live HERE but absent from every census: the case that separates
+# "cross-reference the manifests" from "cross-reference reality". Our own
+# manifest is only as fresh as the last tick that reached the hub, and
+# wip_manifest_write omits any repo whose `git status` failed -- either gap
+# would show a repo sitting right here as an orphan, and orphans get deleted.
+REPO2="$HOME/work/demo2"
+mkdir -p "$REPO2"
+git -C "$REPO2" init -q -b main
+git -C "$REPO2" config user.email t@t; git -C "$REPO2" config user.name t
+git -C "$REPO2" remote add origin https://github.com/acme/Second-App.git
+printf 'v1\n' > "$REPO2/tracked.txt"
+git -C "$REPO2" add -A; git -C "$REPO2" commit -qm init
+DEMO2="$(wip_slug "$REPO2")"
+
+# setup() already made the bare repo for demo; add the other three.
+for s in "$ORPHAN" "$THEIRS" "$DEMO2"; do git init --bare -q "$WIP_REMOTE_PATH/$s.git"; done
+# ...and the leftovers a deleted repo strands on THIS machine.
+git init --bare -q "$WIP_CACHE/$ORPHAN.git"
+: > "$WIP_STATE/$ORPHAN.tree"; : > "$WIP_STATE/$ORPHAN.created"
+
+mkdir -p "$WIP_REMOTE_PATH/_manifest"
+HEADSHA="$(git -C "$REPO" rev-parse HEAD)"
+printf '%s\thttps://github.com/acme/Demo-App.git\twork/demo\t0\t%s\n' \
+  "$DEMO" "$HEADSHA" > "$WIP_REMOTE_PATH/_manifest/testhost.tsv"
+# The other machine has exactly one repo, at a DIFFERENT path from anything
+# here -- that path is what the refusal below has to quote back.
+printf '%s\thttps://github.com/acme/Theirs-App.git\tsrc/theirs\t1\t%s\n' \
+  "$THEIRS" "$HEADSHA" > "$WIP_REMOTE_PATH/_manifest/otherhost.tsv"
+
+LIST="$( ( cd "$SANDBOX" && wip_cmd_forget --list ) 2>&1 )"
+check "forget --list: names the orphaned hub repo" \
+  "$(printf '%s\n' "$LIST" | grep -c "^  $ORPHAN\$")" "1"
+# Unanchored on purpose. A slug that IS listed gets padded and followed by
+# "last seen at ~/...", so a `$`-anchored grep would report 0 for a demo that
+# the command had wrongly offered up for deletion -- passing for exactly the
+# case it exists to catch. (Mutation-checked: with the live set emptied, the
+# anchored form still passed.)
+check "forget --list: not a repo that is live here and in our census" \
+  "$(printf '%s\n' "$LIST" | grep -c "$DEMO")" "0"
+check "forget --list: not a repo that is live only on the other machine" \
+  "$(printf '%s\n' "$LIST" | grep -c "$THEIRS")" "0"
+# The assertion that fails if the live set is built from the two censuses alone.
+check "forget --list: not a repo that is live here but in NO census" \
+  "$(printf '%s\n' "$LIST" | grep -c "$DEMO2")" "0"
+check "forget --list: counts one orphan out of the four hub repos" \
+  "$(printf '%s\n' "$LIST" | grep -c '^1 of 4 hub repo(s) orphaned')" "1"
+# `--list` is the read-only half. Nothing it prints may be a side effect.
+check "forget --list: leaves every hub repo in place" \
+  "$(ls -d "$WIP_REMOTE_PATH"/*.git | wc -l | tr -d ' ')" "4"
+check "forget --list: leaves the shadow cache in place" \
+  "$([ -d "$WIP_CACHE/$ORPHAN.git" ] && echo yes || echo no)" "yes"
+check "forget --list: leaves the markers in place" \
+  "$([ -f "$WIP_STATE/$ORPHAN.tree" ] && echo yes || echo no)" "yes"
+
+# --- the refusal: the other machine still has it -----------------------------
+# Not a safety warning. Whatever is deleted from the hub, the other machine's
+# next tick puts straight back -- so this is "that will not work", and it has to
+# be decided BEFORE the prompt, the way wip_cmd_pull decides its gates.
+REFUSE_RC=0
+REFUSE="$( ( cd "$SANDBOX" && wip_cmd_forget "$THEIRS" <<<y ) 2>&1 )" || REFUSE_RC=$?
+check "forget: refuses when the other machine still has the repo" "$REFUSE_RC" "1"
+check "forget: the refusal quotes the path the other machine has it at" \
+  "$(printf '%s\n' "$REFUSE" | grep -c 'otherhost still has this repo, at ~/src/theirs')" "1"
+check "forget: the refusal names --force as the way past it" \
+  "$(printf '%s\n' "$REFUSE" | grep -c 'or re-run with --force')" "1"
+# Answering `y` above must have been irrelevant: a refusal that still prompts is
+# a question whose answer was going to be ignored.
+check "forget: a refusal never reaches the prompt" \
+  "$(printf '%s\n' "$REFUSE" | grep -c 'Remove them?')" "0"
+check "forget: a refusal leaves the hub repo alone" \
+  "$([ -d "$WIP_REMOTE_PATH/$THEIRS.git" ] && echo yes || echo no)" "yes"
+
+# --- --force overrides that ---------------------------------------------------
+FORCED="$( ( cd "$SANDBOX" && wip_cmd_forget "$THEIRS" --force <<<y ) 2>&1 )"
+check "forget --force: still says the other machine has it" \
+  "$(printf '%s\n' "$FORCED" | grep -c 'otherhost still has this repo')" "1"
+check "forget --force: and goes ahead anyway" \
+  "$(printf '%s\n' "$FORCED" | grep -c 'force given')" "1"
+check "forget --force: the hub repo really is gone" \
+  "$([ -d "$WIP_REMOTE_PATH/$THEIRS.git" ] && echo yes || echo no)" "no"
+
+# --- slug from an argument ----------------------------------------------------
+# The common case: the folder is already deleted, so there is nothing to derive
+# from but the string. A URL has to normalise to the same slug a repo with that
+# origin would have produced -- `wip forget --list` prints slugs, but a user
+# reaching for the origin URL must not be told the hub has never heard of it.
+PLAN="$( ( cd "$SANDBOX" && wip_cmd_forget https://github.com/acme/Gone-App.git <<<n ) 2>&1 )"
+check "forget <url>: normalises a URL argument to the slug" \
+  "$(printf '%s\n' "$PLAN" | grep -c "forget \"$ORPHAN\"")" "1"
+check "forget: the plan names the hub path it will remove" \
+  "$(printf '%s\n' "$PLAN" | grep -c "$WIP_REMOTE_PATH/$ORPHAN.git")" "1"
+check "forget: the plan names the shadow cache it will remove" \
+  "$(printf '%s\n' "$PLAN" | grep -c "$WIP_CACHE/$ORPHAN.git")" "1"
+check "forget: the plan names both markers it will remove" \
+  "$(printf '%s\n' "$PLAN" | grep -c "^  marker ")" "2"
+# The orphan's bare repo is EMPTY, so there is nothing irrecoverable to warn
+# about. The paired assertion, on a hub repo that does hold a snapshot, is in
+# the cwd block below.
+check "forget: no last-copy warning when the hub repo holds no snapshot" \
+  "$(printf '%s\n' "$PLAN" | grep -c 'still holds a snapshot')" "0"
+check "forget: answering n removes nothing" \
+  "$([ -d "$WIP_REMOTE_PATH/$ORPHAN.git" ] && [ -d "$WIP_CACHE/$ORPHAN.git" ] \
+     && [ -f "$WIP_STATE/$ORPHAN.tree" ] && echo intact || echo gone)" "intact"
+
+# A path argument pointing at a LIVE repo must be resolved through its ORIGIN,
+# not normalised as a string: `work-demo` is a slug the hub has never held.
+PATHARG="$( ( cd "$SANDBOX" && wip_cmd_forget "$REPO" <<<n ) 2>&1 )"
+check "forget <path>: a live repo path resolves through its origin, not the path" \
+  "$(printf '%s\n' "$PATHARG" | grep -c "forget \"$DEMO\"")" "1"
+
+# ...and a slug nobody has ever heard of is SAID so, not silently acted on.
+NOMATCH_RC=0
+NOMATCH="$( ( cd "$SANDBOX" && wip_cmd_forget totally-unknown-slug <<<y ) 2>&1 )" || NOMATCH_RC=$?
+check "forget: an unmatched slug is an error, not a silent success" "$NOMATCH_RC" "1"
+check "forget: ...and it says the hub does not hold it" \
+  "$(printf '%s\n' "$NOMATCH" | grep -c 'nothing to forget')" "1"
+
+# --- all three locations, actually cleared ------------------------------------
+FORGOT="$( ( cd "$SANDBOX" && wip_cmd_forget "$ORPHAN" <<<y ) 2>&1 )"
+check "forget: the hub bare repo is gone" \
+  "$([ -e "$WIP_REMOTE_PATH/$ORPHAN.git" ] && echo present || echo gone)" "gone"
+check "forget: the shadow cache is gone" \
+  "$([ -e "$WIP_CACHE/$ORPHAN.git" ] && echo present || echo gone)" "gone"
+check "forget: the .tree marker is gone" \
+  "$([ -e "$WIP_STATE/$ORPHAN.tree" ] && echo present || echo gone)" "gone"
+check "forget: the .created marker is gone" \
+  "$([ -e "$WIP_STATE/$ORPHAN.created" ] && echo present || echo gone)" "gone"
+# Scoped: the OTHER slugs' hub repos and this machine's other state survive.
+check "forget: it removed only that slug from the hub" \
+  "$([ -d "$WIP_REMOTE_PATH/$DEMO.git" ] && [ -d "$WIP_REMOTE_PATH/$DEMO2.git" ] \
+     && echo intact || echo damaged)" "intact"
+# Point 5: this command cannot reach the other machine, and must say so rather
+# than let the user believe the cleanup was complete.
+check "forget: says the other machine's cache and markers are NOT cleaned" \
+  "$(printf '%s\n' "$FORGOT" | grep -c 'NOT cleaned')" "1"
+check "forget: and tells the user to run it there too" \
+  "$(printf '%s\n' "$FORGOT" | grep -c "Run \`wip forget $ORPHAN\` there too")" "1"
+
+# --- slug from $PWD, and the hard guarantee -----------------------------------
+# No argument, run INSIDE the repo. This is also the one invocation where `wip
+# forget` is standing in a working tree while deleting things, so it is where
+# the tool's one hard promise is tested: it must never modify the user's repo.
+#
+# The full .git content manifest, plus a stale index (see stale_index): a `git
+# status` anywhere in this path would rewrite .git/index and the manifest would
+# catch it, along with any stray ref, lock file or object.
+printf 'dirty\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"          # gives demo a real .tree marker and hub content
+wip_fetch "$REPO"             # ...and a real shadow cache
+check "forget: the fixture really has all three for the cwd repo" \
+  "$([ -d "$WIP_REMOTE_PATH/$DEMO.git" ] && [ -d "$WIP_CACHE/$DEMO.git" ] \
+     && [ -f "$WIP_STATE/$DEMO.tree" ] && echo yes || echo no)" "yes"
+
+stale_index "$REPO"
+BEFORE_GIT="$(git_manifest "$REPO")"
+BEFORE_TRACKED="$(cat "$REPO/tracked.txt")"
+CWD_OUT="$( ( cd "$REPO" && wip_cmd_forget <<<y ) 2>&1 )"
+
+check "forget: derives the slug from the repo in \$PWD, via its origin" \
+  "$(printf '%s\n' "$CWD_OUT" | grep -c "forget \"$DEMO\"")" "1"
+# Once both machines have deleted a repo, the hub's bare repo is the ONLY copy
+# of its uncommitted work -- nothing was committed, and `wip undo` cannot reach
+# it. Measured on the live hub 2026-07-28: all three of its orphans still held a
+# 4-hour-old snapshot, so this is the ordinary case for an orphan.
+check "forget: warns that the hub repo still holds an unrecoverable snapshot" \
+  "$(printf '%s\n' "$CWD_OUT" | grep -c 'it still holds a snapshot from testhost')" "1"
+# Run from inside a repo that is still here, the tick will just recreate it --
+# a note rather than a refusal, because this form exists for the moment before
+# you delete the repo.
+check "forget: warns that a repo still present here will be recreated" \
+  "$(printf '%s\n' "$CWD_OUT" | grep -c 'still exists here, at ~/work/demo')" "1"
+check "forget: from \$PWD, all three locations are cleared" \
+  "$([ -e "$WIP_REMOTE_PATH/$DEMO.git" ] || [ -e "$WIP_CACHE/$DEMO.git" ] \
+     || [ -e "$WIP_STATE/$DEMO.tree" ] || [ -e "$WIP_STATE/$DEMO.created" ] \
+     && echo leftover || echo clean)" "clean"
+# THE hard guarantee. Byte-for-byte over every file in .git.
+check "forget: the user's repo is not modified at all" \
+  "$(git_manifest "$REPO")" "$BEFORE_GIT"
+check "forget: the working tree is left alone" \
+  "$(cat "$REPO/tracked.txt")" "$BEFORE_TRACKED"
+check "forget: the repo itself still exists" \
+  "$([ -d "$REPO/.git" ] && echo yes || echo no)" "yes"
+teardown
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

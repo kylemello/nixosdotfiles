@@ -230,7 +230,7 @@ for h in artemis atlas gateway nixosvm; do
   nix eval .#nixosConfigurations.$h.config.system.build.toplevel.drvPath
 done
 nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
-nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh   # 174 passed
+nix shell nixpkgs#coreutils nixpkgs#git -c bash tests/wip.test.sh   # 214 passed
 ```
 
 ## Known gaps

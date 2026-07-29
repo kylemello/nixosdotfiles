@@ -328,6 +328,221 @@ wip_cmd_clone() {
   done < <(wip_missing)
 }
 
+# --- `wip forget` -------------------------------------------------------------
+#
+# Deleting a repo locally stops its snapshots -- wip_repos only walks what
+# exists -- and drops it from the census on the next tick. What it does NOT do is
+# collect the three things the repo leaves behind, because nothing in this tool
+# ever did:
+#
+#   <hub>/<slug>.git                    the bare snapshot repo
+#   $WIP_CACHE/<slug>.git               this machine's shadow cache
+#   $WIP_STATE/<slug>.{tree,created}    this machine's markers
+#
+# Measured against the live hub on 2026-07-28: 23 bare repos, 3 of them matching
+# no repo on either machine.
+#
+# This is the only verb here that deletes anything outside a working tree, so it
+# follows `wip pull`'s discipline exactly: every refusal that can be decided
+# without the user comes BEFORE the prompt, the prompt lists what will go and
+# from where, and the output is honest about the half that cannot be reached.
+#
+# The three populations are reconciled through wip_census_index /
+# wip_local_index / wip_hub_slugs in wip.sh, each read ONCE: three hub
+# round-trips for the whole command, never one per slug.
+wip_cmd_forget() {
+  local arg="" force=0 list=0 a nl=$'\n'
+  local me other mine theirs here hub_slugs live
+  local slug="" subject="" repo="" rel orel hrel reply f line shost sts
+  local hub_has=0 shadow="" markers="" n=0 total=0
+
+  for a in "$@"; do
+    case "$a" in
+      --list)  list=1 ;;
+      --force) force=1 ;;
+      -*)      printf 'wip: forget: unknown option %s\n' "$a" >&2; return 1 ;;
+      *)
+        if [ -n "$arg" ]; then
+          printf 'wip: forget: one repo at a time (got "%s" and "%s")\n' "$arg" "$a" >&2
+          return 1
+        fi
+        arg="$a" ;;
+    esac
+  done
+
+  # Everything below needs to know what the hub actually holds. There is no
+  # honest answer to "what has accumulated?" or "is this slug real?" without it,
+  # and guessing is the one thing a destructive verb must not do.
+  wip_hub_up || {
+    printf 'wip: hub (%s) unreachable — `wip forget` cannot see what it holds.\n' "$WIP_REMOTE_HOST" >&2
+    printf 'wip: nothing was changed. Try again on the network.\n' >&2
+    return 1
+  }
+
+  me="$WIP_HOST"; other="$(wip_other_host)"
+  mine="$(wip_census_index   "$(wip_manifest_read "$me")")"
+  theirs="$(wip_census_index "$(wip_manifest_read "$other")")"
+  here="$(wip_local_index)"
+  hub_slugs="$(wip_hub_slugs)"
+  # A hub repo is live if ANY of the three says so. The local walk sits
+  # alongside our own census rather than replacing it -- see wip_local_index for
+  # why our census alone is not enough.
+  live="$(wip_index_slugs "$mine"; wip_index_slugs "$theirs"; wip_index_slugs "$here")"
+
+  # --- `--list`: change nothing, just say what has accumulated ----------------
+  if [ "$list" -eq 1 ]; then
+    [ -z "$arg" ] || { printf 'wip: forget: --list takes no argument\n' >&2; return 1; }
+    while IFS= read -r slug; do
+      [ -n "$slug" ] || continue
+      total=$((total+1))
+      case "$nl$live$nl" in *"$nl$slug$nl"*) continue ;; esac
+      [ "$n" -gt 0 ] || printf 'Hub (%s) repos with no live repo on %s or %s:\n\n' \
+        "$WIP_REMOTE_HOST" "$me" "$other"
+      n=$((n+1))
+      # A path is only on record for a slug some census still lists, so a
+      # genuine orphan usually has none. Print the slug alone rather than
+      # reversing it into a guess: wip_slug's path fallback is lossy, and a `-`
+      # in a slug could have been `/`, `.` or `_`.
+      rel="$(wip_index_path "$slug" "$mine" || wip_index_path "$slug" "$theirs" || true)"
+      if [ -n "$rel" ]; then printf '  %-48s last seen at ~/%s\n' "$slug" "$rel"
+      else                   printf '  %s\n' "$slug"; fi
+    done <<< "$hub_slugs"
+    if [ "$n" -eq 0 ]; then
+      printf 'wip: nothing orphaned — all %d hub repo(s) match a live repo.\n' "$total"
+    else
+      printf '\n%d of %d hub repo(s) orphaned. `wip forget <slug>` removes one.\n' "$n" "$total"
+    fi
+    return 0
+  fi
+
+  # --- which slug -------------------------------------------------------------
+  if [ -n "$arg" ]; then
+    slug="$(wip_slug_from_arg "$arg")"; subject="$arg"
+  else
+    repo="$(wip_cwd_repo)"
+    [ -n "$repo" ] || {
+      printf 'wip: not in a git repo — name a slug, or run `wip forget --list` to see what the hub holds.\n' >&2
+      return 1
+    }
+    slug="$(wip_slug "$repo")"; subject="$repo"
+  fi
+  # Slugs are [a-z0-9-] by construction (wip_slug_normalize's final sed).
+  # Anything else means the derivation produced something that is not a slug,
+  # and this is the gate that keeps such a value out of the remote `rm -rf` in
+  # wip_hub_rm_repo.
+  case "$slug" in
+    ''|*[!a-z0-9-]*)
+      printf 'wip: forget: "%s" does not reduce to a slug (got "%s") — refusing.\n' "$subject" "$slug" >&2
+      return 1 ;;
+  esac
+
+  # --- what actually exists for it --------------------------------------------
+  case "$nl$hub_slugs$nl" in *"$nl$slug$nl"*) hub_has=1 ;; esac
+  shadow="$(wip_shadow "$slug")"
+  [ -d "$shadow" ] || shadow=""
+  # `if`, not `[ -e "$f" ] && markers=...`: the generated binary runs under
+  # `set -e`, and when the last iteration's test is false the loop's own status
+  # is that failure. It happens to be exempt (the failing command is not the one
+  # following the final `&&`), but relying on which side of that exemption a
+  # line falls is how this tool has been bitten before -- see the `|| true` on
+  # the `notice` verb in the dispatcher below.
+  for f in "$WIP_STATE/$slug.tree" "$WIP_STATE/$slug.created"; do
+    if [ -e "$f" ]; then markers="${markers:+$markers$nl}$f"; fi
+  done
+
+  # Nothing anywhere. This is the "do not silently guess" case: an argument that
+  # normalised to a slug nobody has ever heard of must say so, not shrug and
+  # report success.
+  if [ "$hub_has" -eq 0 ] && [ -z "$shadow" ] && [ -z "$markers" ]; then
+    printf 'wip: nothing to forget — the hub has no "%s.git", and this machine has no cache or markers for it.\n' \
+      "$slug" >&2
+    [ "$slug" = "$subject" ] || printf 'wip: ("%s" reduced to the slug "%s".)\n' "$subject" "$slug" >&2
+    printf 'wip: `wip forget --list` shows what the hub actually holds.\n' >&2
+    return 1
+  fi
+
+  # The main way to misuse this verb, and the reason it is a refusal rather than
+  # a warning: whatever we delete from the hub, the other machine's next tick
+  # puts straight back. This is not "are you sure", it is "that will not work".
+  if orel="$(wip_index_path "$slug" "$theirs")"; then
+    printf 'wip: %s still has this repo%s.\n' "$other" "${orel:+, at ~/$orel}" >&2
+    printf 'wip: deleting the hub copy achieves nothing — %s recreates it on its next tick.\n' "$other" >&2
+    if [ "$force" -ne 1 ]; then
+      printf 'wip: delete the repo on %s first, or re-run with --force.\n' "$other" >&2
+      return 1
+    fi
+    printf 'wip: --force given — continuing anyway.\n' >&2
+  fi
+
+  # Our own side is a NOTE, not a refusal. `wip forget` with no argument is run
+  # from INSIDE the repo by design -- typically in the moment before deleting it
+  # -- and refusing there would make that form useless.
+  if hrel="$(wip_index_path "$slug" "$here")"; then
+    printf 'wip: note — this repo still exists here, at ~/%s. This machine will recreate\n' "$hrel"
+    printf 'wip:        the hub repo on its next tick unless you delete the repo too.\n'
+  fi
+
+  # --- confirm, naming every path and where it lives --------------------------
+  printf 'wip: forget "%s" — this removes:\n' "$slug"
+  # A fixed-width label column, so the three destinations line up whatever the
+  # hub is called -- this is the list the user is consenting to.
+  if [ "$hub_has" -eq 1 ]; then
+    printf '  %-14s %s/%s.git\n' "hub ($WIP_REMOTE_HOST)" "$WIP_REMOTE_PATH" "$slug"
+    # A bare repo that still holds a snapshot is not just clutter. Once both
+    # machines have deleted the repo, this is the ONLY place that uncommitted
+    # work exists -- nothing was committed, no shadow cache is refreshed for it
+    # and `wip undo` cannot reach it. Say so before the prompt, not after.
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      shost="${line%%$'\t'*}"; sts="${line##*$'\t'}"
+      case "$sts" in ''|*[!0-9]*) sts="" ;; esac
+      if [ -n "$sts" ]; then
+        printf '     !! it still holds a snapshot from %s, %s old — deleting it ends that work\n' \
+          "$shost" "$(wip_human_age "$(( $(date +%s) - sts ))")"
+      else
+        printf '     !! it still holds a snapshot from %s — deleting it ends that work\n' "$shost"
+      fi
+    done <<< "$(wip_hub_snapshots "$slug")"
+  else
+    printf '  %-14s (nothing — no %s.git there)\n' "hub ($WIP_REMOTE_HOST)" "$slug"
+  fi
+  if [ -n "$shadow" ]; then printf '  %-14s %s\n' "shadow cache" "$shadow"
+  else                      printf '  %-14s (nothing)\n' "shadow cache"; fi
+  if [ -n "$markers" ]; then
+    while IFS= read -r f; do printf '  %-14s %s\n' "marker" "$f"; done <<< "$markers"
+  else
+    printf '  %-14s (nothing)\n' "markers"
+  fi
+  # This verb NEVER touches the repo itself, even when run from inside one, and
+  # the list above is the promise -- so say so where the user is deciding.
+  printf '  (the repository itself is not touched)\n'
+  printf 'Remove them? [y/N] '
+  # `|| reply=""` so an exhausted stdin aborts with a message rather than taking
+  # the generated binary's `set -e` down mid-prompt, as in wip_cmd_pull.
+  read -r reply || reply=""
+  case "$reply" in y|Y) ;; *) echo "wip: aborted."; return 0 ;; esac
+
+  # Hub first, and abort outright if it fails: leaving the hub repo while
+  # deleting the local cache and markers is the worst of both, since the next
+  # tick would re-fetch it and the user would be told it was forgotten.
+  if [ "$hub_has" -eq 1 ] && ! wip_hub_rm_repo "$slug"; then
+    printf 'wip: could not remove %s/%s.git from the hub — nothing else was touched.\n' \
+      "$WIP_REMOTE_PATH" "$slug" >&2
+    return 1
+  fi
+  [ -z "$shadow" ] || rm -rf "$shadow"
+  if [ -n "$markers" ]; then
+    while IFS= read -r f; do rm -f "$f"; done <<< "$markers"
+  fi
+
+  printf 'wip: forgotten "%s".\n' "$slug"
+  # The half this command cannot reach. Nothing in this tool ever ssh's into the
+  # other machine -- there is no credential for it and no reason to invent one
+  # for a cleanup verb -- so name what is left rather than implying it is done.
+  printf 'wip: NOT cleaned: the shadow cache and markers on %s — this command cannot reach\n' "$other"
+  printf 'wip:              that machine. Run `wip forget %s` there too.\n' "$slug"
+}
+
 # Bare `wip`: in a repo, report on it. Elsewhere, report on everything.
 wip_cmd_status() {
   local repo n=0 notice slug url rel stale
@@ -373,11 +588,12 @@ case "${1:-status}" in
   pull)      shift; wip_cmd_pull "$@" ;;
   undo)      wip_cmd_undo ;;
   clone)     wip_cmd_clone ;;
+  forget)    shift; wip_cmd_forget "$@" ;;
   # `|| true` because this `&&` test is the script's LAST command, so under the
   # generated binary's `set -euo pipefail` a false test becomes the exit status:
   # `wip notice` outside a repo measured exit=1 (inside: exit=0). Harmless for
   # the fish hook, which discards it, but wrong for a documented interface --
   # "nothing to report" is not a failure.
   notice)    repo="$(wip_cwd_repo)"; { [ -n "$repo" ] && wip_notice "$repo"; } || true ;;
-  *)         echo "usage: wip [status|push [--all]|fetch|diff|pull [--force]|undo|clone]" >&2; exit 1 ;;
+  *)         echo "usage: wip [status|push [--all]|fetch|diff|pull [--force]|undo|clone|forget [<slug>|--list] [--force]]" >&2; exit 1 ;;
 esac
