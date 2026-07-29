@@ -42,7 +42,14 @@ let
     git = {
       type = "stdio";
       command = "uvx";
-      args = [ "mcp-server-git" ];
+      # `--with 'mcp<2'` is load-bearing. mcp-server-git 2026.7.10 calls
+      # `@server.list_tools()`, which the mcp SDK removed in 2.0.0, so an
+      # unpinned uvx resolves the newest SDK and the server dies on startup
+      # with `AttributeError: 'Server' object has no attribute 'list_tools'`.
+      # Claude Code surfaces that only as "Connection closed", which is why it
+      # looked like a config problem. Broken on BOTH machines, not just one.
+      # Drop the pin once mcp-server-git supports SDK 2.x.
+      args = [ "--with" "mcp<2" "mcp-server-git" ];
       env = { };
     };
     kubernetes = {
