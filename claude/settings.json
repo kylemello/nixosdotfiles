@@ -36,6 +36,20 @@
     "typescript-lsp@claude-plugins-official": true,
     "pr-review-toolkit@claude-plugins-official": true
   },
+  "extraKnownMarketplaces": {
+    "kmello": {
+      "source": {
+        "source": "directory",
+        "path": "/Users/kyle/personal/claude-plugins"
+      }
+    },
+    "kmello-dev": {
+      "source": {
+        "source": "directory",
+        "path": "/Users/kyle/work/claude-plugins"
+      }
+    }
+  },
   "spinnerVerbs": {
     "mode": "replace",
     "verbs": [
@@ -150,13 +164,5 @@
   "remoteControlAtStartup": true,
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
-  "voiceEnabled": false,
-  "extraKnownMarketplaces": {
-    "kmello": {
-      "source": {
-        "source": "directory",
-        "path": "/Users/kyle/personal/claude-plugins"
-      }
-    }
-  }
+  "voiceEnabled": false
 }
