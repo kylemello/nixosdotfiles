@@ -1,6 +1,5 @@
 { lib, pkgs, config, ... }:
-# Declarative Claude Code MCP servers, pointing at the home-lab MetaMCP gateway
-# (https://mcp.kmello.dev). This registers user-scope MCP servers so every host that
+# Declarative Claude Code MCP servers. This registers user-scope MCP servers so every host that
 # imports this module sees the same set — no per-machine `claude mcp add` needed.
 #
 # Auth is OAuth, so NOTHING secret lives here: after a rebuild, run
@@ -27,12 +26,19 @@ let
   # `/mcp` -> authenticate -> pick the `aegistherapies` site, once per host. (That
   # replaces the manual `claude mcp add` step documented in ~/work/claude-plugins/README.md,
   # which aegis-jira's creating-adt-tickets skill hard-depends on by name.)
-  baseServers = {
-    personal = {
-      type = "http";
-      url = "https://mcp.kmello.dev/metamcp/personal/mcp";
-    };
-  };
+  # REMOVED 2026-07-28: the MetaMCP `personal` endpoint. Its OAuth flow rejects
+  # Claude Code's loopback callback --
+  #   Invalid redirect URI: http://localhost:3118/callback.
+  #   Must use secure scheme and valid format.
+  # -- which RFC 8252 s7.3 and OAuth 2.1 both explicitly permit for native
+  # clients. artemis only kept working because it held a token granted before
+  # that restriction; ariane could never complete a login. Rather than relax the
+  # server, the MetaMCP deployment is being retired.
+  #
+  # Nothing is declared for every host now, so baseServers is empty. Keep it:
+  # it is the seam where a genuinely universal server would go, and dropping it
+  # would mean reshaping the merge below to add one back.
+  baseServers = { };
 
   workstationServers = {
     atlassian-aegis = {
