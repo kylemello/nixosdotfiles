@@ -37,6 +37,17 @@
     enable = true;
     host = "ariane";
     roots = [ "personal" "work" ];
+
+    # OFF because the tick's `git -C ~/nixosdotfiles fetch` goes to GitHub over
+    # SSH, which reaches the 1Password agent and asks for approval every five
+    # minutes. The dedicated hub key fixed the wip<->gateway path; this is a
+    # separate one, and the key cannot help because the flake remote is
+    # git@github.com and must stay on the interactive credential.
+    #
+    # Only the `@{u}` half of the drift alarm depended on this. The half that
+    # matters -- "you have commits this machine has not switched to" -- compares
+    # local HEAD against the last-activation stamp and still works.
+    driftCheck = false;
   };
 
   # Warn at shell start when ariane is running an older nixosdotfiles than the
