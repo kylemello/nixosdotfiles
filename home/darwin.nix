@@ -23,8 +23,16 @@
   # Logical host name for `wip` refs — NOT the machine's real hostname
   # (kyles-macbook-pro), which would make for confusing ref names. Enabled here
   # rather than in a shared profile, so only the machines that should
-  # participate do. sshCommand is left at its pkgs.openssh default: macOS
-  # 1Password exposes its agent through a local socket that Nix's ssh reaches.
+  # participate do.
+  #
+  # sshCommand and identityFile are both left at their defaults: Nix's openssh,
+  # and ~/.ssh/wip_hub_ed25519. The hub is deliberately NOT reached through this
+  # machine's 1Password agent — see kyle.wip.identityFile in home/wip.nix. Note
+  # ~/.ssh/config sets `IdentityAgent` under `Host *` here, which is exactly why
+  # the hub options include IdentitiesOnly=yes.
+  #
+  # This host cannot reach the hub until ~/.ssh/wip_hub_ed25519 exists here and
+  # its public half is in machines/gateway/configuration.nix.
   kyle.wip = {
     enable = true;
     host = "ariane";

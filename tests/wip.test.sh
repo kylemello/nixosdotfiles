@@ -675,13 +675,148 @@ check "undo: from a subdirectory, restores the whole tree" \
   "$(cat "$REPO/top.txt")" "mine-top"
 teardown
 
+# --- fetch: one census read, then only the repos that have a snapshot --------
+# `wip fetch` used to call wip_fetch on EVERY local repo unconditionally: one
+# TCP connection and one public-key authentication per repo. Measured on artemis
+# 2026-07-28, straight out of the timer's journal: 36 connections a tick, 32 of
+# them ending in "fetch from hub failed" because the other machine had never
+# published those slugs, every five minutes, each one an approval prompt.
+#
+# The other host's census already says which slugs have a snapshot waiting, so
+# one round-trip answers it for the whole batch. These assertions pin both
+# halves: WHICH repos get fetched, and -- by routing git's own transport through
+# the same ssh stub -- how many connections that actually costs.
+setup
+export WIP_LOCAL_HUB=0
+SSHLOG="$SANDBOX/ssh.log"; : > "$SSHLOG"
+cat > "$SANDBOX/ssh-stub" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SSHLOG"
+exec bash -c "\${*: -1}"
+STUB
+chmod +x "$SANDBOX/ssh-stub"
+export WIP_SSH="$SANDBOX/ssh-stub"
+# git's transport through the SAME stub, so a per-repo `git fetch` shows up as
+# the connection it really is. Without this the count below could only see the
+# direct ssh calls -- i.e. it would miss the entire thing under test.
+export GIT_SSH_COMMAND="$SANDBOX/ssh-stub"
+
+REPO2="$HOME/work/demo2"; REPO3="$HOME/work/demo3"
+# REPO4 deliberately has NO origin, so wip_slug falls back to the $HOME-relative
+# path and its census row carries an EMPTY url column. See the census below.
+REPO4="$HOME/work/demo4"
+for r in "$REPO2" "$REPO3" "$REPO4"; do
+  mkdir -p "$r"
+  git -C "$r" init -q -b main
+  git -C "$r" config user.email t@t; git -C "$r" config user.name t
+  printf 'v1\n' > "$r/tracked.txt"
+  git -C "$r" add -A; git -C "$r" commit -qm init
+done
+git -C "$REPO2" remote add origin https://github.com/acme/Second-App.git
+git -C "$REPO3" remote add origin https://github.com/acme/Third-App.git
+# Bare repos for all of them, so a wrongly-unfiltered fetch would SUCCEED rather
+# than erroring out. The filter has to be what stops the connection, not a
+# missing repo on the hub.
+for r in "$REPO2" "$REPO3" "$REPO4"; do git init --bare -q "$WIP_REMOTE_PATH/$(wip_slug "$r").git"; done
+SHADOW1="$(wip_shadow "$(wip_slug "$REPO")")"
+
+# --- nothing published yet: the state both machines were actually in ---------
+: > "$SSHLOG"
+wip_cmd_fetch_all
+check "fetch batch: an unpublished slug costs no connection at all" \
+  "$(grep -c 'git-upload-pack' "$SSHLOG")" "0"
+# The whole tick's remaining cost: the reachability probe and ONE census read.
+# Both are per-tick, not per-repo, and multiplexing collapses them onto a single
+# authentication.
+check "fetch batch: an idle tick is the probe plus one census read, nothing more" \
+  "$(grep -c . "$SSHLOG")" "2"
+check "fetch batch: no shadow repo is created for a slug nobody published" \
+  "$(ls "$WIP_CACHE" | wc -l | tr -d ' ')" "0"
+
+# --- one slug published dirty, one clean, one absent from the census ---------
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+printf 'from-other\n' > "$REPO/tracked.txt"
+( export WIP_LOCAL_HUB=1; wip_snapshot "$REPO" )
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+printf 'mine\n' > "$REPO/tracked.txt"
+
+MANOTHER="$WIP_REMOTE_PATH/_manifest/otherhost.tsv"
+mkdir -p "$WIP_REMOTE_PATH/_manifest"
+write_other_census() {   # $1 = dirty flag for demo, $2 = dirty flag for demo4
+  {
+    printf '%s\thttps://github.com/acme/Demo-App.git\twork/demo\t%s\t%s\n' \
+      "$(wip_slug "$REPO")" "$1" "$(git -C "$REPO" rev-parse HEAD)"
+    printf '%s\thttps://github.com/acme/Second-App.git\twork/demo2\t0\t%s\n' \
+      "$(wip_slug "$REPO2")" "$(git -C "$REPO2" rev-parse HEAD)"
+    # An ORIGIN-LESS repo: wip_manifest_write emits an empty url column for it,
+    # i.e. two adjacent tabs. TAB is IFS whitespace, so the obvious
+    # `IFS=$'\t' read -r slug url rel dirty head` collapses them, shifts every
+    # field left by one and reads the head SHA as the dirty flag -- which drops
+    # exactly the repos that exist on ONLY the other machine. Measured against
+    # the live gateway census: 2 of 7 waiting snapshots silently skipped.
+    printf '%s\t\twork/demo4\t%s\t%s\n' \
+      "$(wip_slug "$REPO4")" "$2" "$(git -C "$REPO4" rev-parse HEAD)"
+  } > "$MANOTHER"
+}
+write_other_census 1 1
+
+: > "$SSHLOG"
+wip_cmd_fetch_all
+check "fetch batch: fetches the slug the other host published a snapshot for" \
+  "$(git --git-dir="$SHADOW1" rev-parse --verify --quiet refs/wip/otherhost >/dev/null 2>&1 \
+     && echo yes || echo no)" "yes"
+check "fetch batch: skips a slug the other host reports clean" \
+  "$([ -d "$(wip_shadow "$(wip_slug "$REPO2")")" ] && echo yes || echo no)" "no"
+check "fetch batch: skips a slug missing from the census entirely" \
+  "$([ -d "$(wip_shadow "$(wip_slug "$REPO3")")" ] && echo yes || echo no)" "no"
+# The origin-less row. A repo with no `origin` exists on ONE machine by
+# definition, so its snapshot is the only copy of that work there is -- the
+# worst possible row to drop, and the one the tab-collapsing parse drops.
+check "fetch batch: a published row with an empty url column is not skipped" \
+  "$([ -d "$(wip_shadow "$(wip_slug "$REPO4")")" ] && echo yes || echo no)" "yes"
+check "fetch batch: one per-repo connection each for the two published repos" \
+  "$(grep -c 'git-upload-pack' "$SSHLOG")" "2"
+# The point of hoisting the read into the batch: three repos, one census read.
+# Per-repo it would cost the very round-trip the filter exists to save.
+check "fetch batch: the census is read once for the batch, not once per repo" \
+  "$(grep -c '_manifest/otherhost.tsv' "$SSHLOG")" "1"
+
+# --- a WITHDRAWN snapshot must not be stranded in the shadow -----------------
+# The other host commits its work: hub ref deleted, census flips to dirty=0. A
+# census-only filter would never look at that slug again, leaving a stale
+# refs/wip/otherhost that `wip notice` keeps announcing and `wip pull` offers to
+# apply. One more fetch prunes it, and then it drops out for good.
+git -C "$BARE" update-ref -d refs/heads/wip/otherhost
+write_other_census 0 0
+: > "$SSHLOG"
+wip_cmd_fetch_all
+check "fetch batch: a withdrawn snapshot is still fetched once, so --prune can retire it" \
+  "$(grep -c 'git-upload-pack' "$SSHLOG")" "1"
+check "fetch batch: and the stale shadow ref is actually gone afterwards" \
+  "$(git --git-dir="$SHADOW1" rev-parse --verify --quiet refs/wip/otherhost >/dev/null 2>&1 \
+     && echo present || echo gone)" "gone"
+: > "$SSHLOG"
+wip_cmd_fetch_all
+check "fetch batch: once retired, that slug stops costing a connection" \
+  "$(grep -c 'git-upload-pack' "$SSHLOG")" "0"
+
+# The filter belongs to the BATCH. wip_fetch's contract is "you hand me a repo,
+# I fetch it" -- putting the census check inside it would cost one round-trip
+# per repo and break every single-repo caller.
+: > "$SSHLOG"
+wip_fetch "$REPO3"
+check "fetch: a direct single-repo fetch is still unconditional" \
+  "$(grep -c 'git-upload-pack' "$SSHLOG")" "1"
+unset GIT_SSH_COMMAND WIP_SSH
+teardown
+
 # --- WIP_SSH indirection -----------------------------------------------------
-# artemis reaches its 1Password agent through `ssh.exe` on the Windows side, so
-# every ssh call has to go through "${WIP_SSH:-ssh}". GIT_SSH_COMMAND covers
-# git's own push/fetch but nothing covers a direct `ssh`, so a bare one would
-# authenticate against an agent that is not there. These assertions drive the
-# four non-git call sites with WIP_SSH pointed at a stub; each one FAILS if that
-# site reaches for bare `ssh`, because the real ssh cannot reach "unused".
+# Every ssh call has to go through wip_hub_ssh. GIT_SSH_COMMAND covers git's own
+# push/fetch but nothing covers a direct `ssh`, so a bare one would miss both the
+# dedicated hub key and the shared connection. These assertions drive the four
+# non-git call sites with WIP_SSH pointed at a stub; each one FAILS if that site
+# reaches for bare `ssh`, because the real ssh cannot reach "unused".
 setup
 export WIP_LOCAL_HUB=0            # take the ssh path, not the local-directory one
 SSHLOG="$SANDBOX/ssh.log"; : > "$SSHLOG"
@@ -694,6 +829,13 @@ exec bash -c "\${*: -1}"
 STUB
 chmod +x "$SANDBOX/ssh-stub"
 export WIP_SSH="$SANDBOX/ssh-stub"
+# The hub key and the shared connection, which home/wip.nix sets from
+# kyle.wip.identityFile and its controlPath. Both are per-CALL-SITE: a call site
+# that skips wip_hub_ssh gets neither, which costs a whole extra handshake (and,
+# with the agent back in play, an approval prompt) that nothing else would
+# notice. Hence the counts below, which are the line count of the whole log.
+export WIP_SSH_IDENTITY="$SANDBOX/wip_hub_ed25519"
+export WIP_SSH_CONTROL="$SANDBOX/cm/%C"
 
 printf 'dirty\n' > "$REPO/tracked.txt"
 HUB_UP="$(wip_hub_up && echo up || echo down)"
@@ -717,6 +859,19 @@ check "ssh: wip_manifest_read reads the census back through WIP_SSH" \
 # purpose -- that is the point of pinning it.
 check "ssh: the stub recorded every ssh call site (no bare ssh left)" \
   "$(grep -c . "$SSHLOG")" "5"
+# 5, i.e. every line in the log. Multiplexing that misses one call site is a
+# whole extra TCP connection and public-key authentication per tick.
+check "ssh: every hub call site rides the shared connection" \
+  "$(grep -cF -e "-o ControlMaster=auto -o ControlPath=$SANDBOX/cm/%C -o ControlPersist=60" "$SSHLOG")" "5"
+# IdentitiesOnly is half the assertion on purpose: with -i alone, ssh still
+# offers the agent's keys first (ariane's ~/.ssh/config sets IdentityAgent for
+# `Host *`), the agent signs, and the approval prompt is back.
+check "ssh: every hub call site authenticates with the dedicated key, not the agent" \
+  "$(grep -cF -e "-i $SANDBOX/wip_hub_ed25519 -o IdentitiesOnly=yes" "$SSHLOG")" "5"
+# ssh does not create the ControlPath's parent, and a missing one is a fatal
+# bind() error rather than a fallback -- it would take out every hub operation.
+check "ssh: the control socket's directory is created (ssh will not do it)" \
+  "$([ -d "$SANDBOX/cm" ] && echo yes || echo no)" "yes"
 
 # The remaining two call sites are wip_manifest_write's cleanup, reached only
 # when a publish fails -- and they are `2>/dev/null || true`, so nothing above can
@@ -735,7 +890,29 @@ chmod +x "$SANDBOX/ssh-stub-fail"
 ( export WIP_SSH="$SANDBOX/ssh-stub-fail"; wip_manifest_write ) >/dev/null 2>&1
 check "ssh: the failed-publish cleanup goes through WIP_SSH too" \
   "$(grep -c 'rm -f' "$SSHLOG")" "1"
-unset WIP_SSH
+# 2 = the failed publish and its cleanup, i.e. every line here too.
+check "ssh: the failed-publish path rides the shared connection as well" \
+  "$(grep -cF -e '-o ControlMaster=auto' "$SSHLOG")" "2"
+unset WIP_SSH WIP_SSH_IDENTITY WIP_SSH_CONTROL
+teardown
+
+# --- the hub key and multiplexing are opt-in ---------------------------------
+# Neither may be invented by wip.sh out of thin air. The suite drives a local
+# directory as the hub and stubs ssh where it does not, and a hardcoded
+# ControlPath would put a socket somewhere unexpected on any machine that merely
+# sourced this file. Unset means absent, not defaulted.
+setup
+export WIP_LOCAL_HUB=0
+SSHLOG="$SANDBOX/ssh.log"; : > "$SSHLOG"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %s\nexit 0\n' "$SSHLOG" > "$SANDBOX/ssh-plain"
+chmod +x "$SANDBOX/ssh-plain"
+( export WIP_SSH="$SANDBOX/ssh-plain"; wip_hub_up ) >/dev/null 2>&1
+check "ssh: the probe still happens with neither configured" \
+  "$(grep -c . "$SSHLOG")" "1"
+check "ssh: no ControlPath is invented when none is configured" \
+  "$(grep -cF -e 'ControlMaster' "$SSHLOG")" "0"
+check "ssh: no identity is invented when none is configured" \
+  "$(grep -cF -e 'IdentitiesOnly' "$SSHLOG")" "0"
 teardown
 
 # --- an unresolvable WIP_SSH is a misconfiguration, not a sleeping hub --------

@@ -9,19 +9,73 @@ let
   stateDir = "${config.xdg.stateHome}/wip";
   cacheDir = "${config.xdg.cacheHome}/wip";
 
+  # --- one SSH connection per tick ------------------------------------------
+  #
+  # Socket for OpenSSH connection multiplexing. `%C` (a hash of
+  # local-host/host/port/user) rather than `%h/%p/%r`, for one reason: LENGTH.
+  # ssh copies this path into a sockaddr_un, whose sun_path is 104 bytes on
+  # macOS (108 on Linux), and before binding the real path it first binds
+  # "<path>.XXXXXXXXXXXX" -- 13 more characters. Over the limit, ssh dies with
+  # "ControlPath too long for Unix domain socket" and exit 255, which
+  # wip_hub_up cannot tell from a sleeping hub: every hub operation would fail
+  # silently, forever. Measured with OpenSSH 10.2 on 2026-07-28:
+  #
+  #   ariane   /Users/kyle/.local/state/wip/cm-<40 hex>   72 chars, 85 with the
+  #                                                       temp suffix (cap 103)
+  #   artemis  /home/kyle/.local/state/wip/cm-<40 hex>    71 chars, 84
+  #
+  # %C is a SHA-1 hex digest, so it is 40 characters on every host and this
+  # arithmetic does not drift. The assertion below pins it anyway, because the
+  # failure it guards against is invisible at runtime.
+  controlPath = "${stateDir}/cm-%C";
+  # `- 2 + 40`: the literal "%C" in the Nix string becomes 40 hex characters.
+  controlPathLen = (lib.stringLength controlPath) - 2 + 40;
+
+  # Options carried by every connection to the HUB -- this file's GIT_SSH_COMMAND
+  # and, through WIP_SSH_IDENTITY/WIP_SSH_CONTROL below, wip_hub_ssh's direct ssh
+  # calls in home/wip/wip.sh. The two must agree or the tick opens two
+  # connections instead of one.
+  #
+  # NOT applied to the drift fetch further down: that one talks to GitHub, which
+  # has never heard of this key.
+  hubSshOpts = lib.concatStringsSep " " [
+    "-i ${cfg.identityFile}"
+    # Load-bearing. ariane's ~/.ssh/config sets IdentityAgent for `Host *`, so
+    # without this ssh offers the 1Password agent's keys BEFORE the -i one, the
+    # agent signs, and the approval prompt this whole change exists to remove
+    # comes straight back.
+    "-o IdentitiesOnly=yes"
+    "-o ControlMaster=auto"
+    "-o ControlPath=${controlPath}"
+    "-o ControlPersist=60"
+  ];
+
+  # The ssh binary this host's `git` already uses for GitHub. NOT cfg.sshCommand:
+  # `wip` talks to the hub, the drift check below talks to GitHub, and since the
+  # hub moved to a dedicated on-disk key those are two different destinations
+  # with two different credentials. On artemis GitHub is still reached through
+  # `ssh.exe` and the Windows 1Password agent (home/wsl.nix sets
+  # programs.git.settings.core.sshCommand); verified working from the systemd
+  # timer on 2026-07-28, so pointing the drift fetch at Nix's openssh instead
+  # would break a thing that currently works.
+  gitSshCommand =
+    lib.attrByPath [ "core" "sshCommand" ] "${pkgs.openssh}/bin/ssh"
+      config.programs.git.settings;
+
   # The script is assembled rather than templated so home/wip/*.sh stay
   # directly testable (see tests/wip.test.sh).
   wip = pkgs.writeShellScriptBin "wip" ''
     set -euo pipefail
     # config.home.sessionPath is appended because this script runs in contexts
     # that never source hm-session-vars.sh — above all the systemd user timer,
-    # whose unit has no Environment=PATH. On artemis `ssh.exe` is a bare command
-    # name living under /mnt/c/…/OpenSSH/, and hosts/wsl.nix sets
-    # wsl.interop.includePath = false, so home.sessionPath is its ONLY source.
-    # Without this the timer resolves nothing, wip_hub_up reads the shell's 127
-    # as "hub away", and the timer pushes nothing and logs nothing every 5
-    # minutes — while `wip push` typed by hand still works, because an
-    # interactive shell does have the directory.
+    # whose unit has no Environment=PATH. `wip`'s own ssh is now an absolute
+    # store path on both machines, but the drift fetch below still runs artemis's
+    # `ssh.exe`: a bare command name living under /mnt/c/…/OpenSSH/, and
+    # hosts/wsl.nix sets wsl.interop.includePath = false, so home.sessionPath is
+    # its ONLY source. Without this the timer resolves nothing, wip_hub_up reads
+    # the shell's 127 as "hub away", and the timer pushes nothing and logs
+    # nothing every 5 minutes — while `wip push` typed by hand still works,
+    # because an interactive shell does have the directory.
     export PATH="${lib.concatStringsSep ":" (
       [ (lib.makeBinPath (with pkgs; [ git openssh coreutils findutils gnused ])) ]
       ++ config.home.sessionPath
@@ -47,18 +101,23 @@ let
     export WIP_CACHE=${lib.escapeShellArg cacheDir}
     export WIP_STATE=${lib.escapeShellArg stateDir}
 
+    export WIP_SSH=${lib.escapeShellArg cfg.sshCommand}
+    # Consumed by wip_hub_ssh in home/wip/wip.sh. Set HERE rather than derived
+    # in the shell so that these and GIT_SSH_COMMAND below cannot drift apart:
+    # if git multiplexes onto a different socket than the direct ssh calls, the
+    # tick quietly opens two connections instead of one.
+    export WIP_SSH_IDENTITY=${lib.escapeShellArg cfg.identityFile}
+    export WIP_SSH_CONTROL=${lib.escapeShellArg controlPath}
+
     # Bound git's SSH too, not just wip_hub_up's probe — the hub is LAN-only,
     # so a push attempt from off-network must fail fast rather than block.
+    # GIT_SSH_COMMAND OVERRIDES core.sshCommand, which is the point: git's own
+    # ssh config is aimed at GitHub, and the hub now has its own key.
     #
-    # The BINARY is per-host and must not be hardcoded to pkgs.openssh. On artemis
-    # the 1Password SSH agent lives on the Windows host, which is why
-    # home/wsl.nix sets programs.git.settings.core.sshCommand = "ssh.exe".
-    # GIT_SSH_COMMAND OVERRIDES core.sshCommand, so hardcoding Nix's openssh here
-    # would bypass that agent entirely: every push from artemis would fail auth,
-    # and with BatchMode=yes it would fail silently, in the timer's journal only.
-    # wip_hub_up's bare `ssh` has the same problem via the PATH above.
-    export WIP_SSH=${lib.escapeShellArg cfg.sshCommand}
-    export GIT_SSH_COMMAND="$WIP_SSH -o BatchMode=yes -o ConnectTimeout=5"
+    # Not escapeShellArg'd as a whole and not quotable: git SHELL-PARSES this
+    # value, so the options have to arrive as separate words. That also means no
+    # path in it may contain a space — both are Nix store / $HOME paths.
+    export GIT_SSH_COMMAND="$WIP_SSH ${hubSshOpts} -o BatchMode=yes -o ConnectTimeout=5"
 
     source ${./wip/wip.sh}
     source ${./wip/main.sh}
@@ -77,7 +136,7 @@ let
   sessionPathPrefix = lib.concatMapStrings (p: "${p}:") config.home.sessionPath;
 
   # What the timer actually runs. Every command is an absolute store path, with
-  # one deliberate exception (cfg.sshCommand — see the drift block below).
+  # one deliberate exception (gitSshCommand — see the drift block below).
   tick = pkgs.writeShellScript "wip-tick" ''
     set -uo pipefail
 
@@ -100,10 +159,16 @@ let
       # 1. The ssh BINARY. On artemis git reaches GitHub through
       #    core.sshCommand = "ssh.exe" (home/wsl.nix) — the keys live in the
       #    Windows 1Password agent. GIT_SSH_COMMAND OVERRIDES core.sshCommand,
-      #    so this uses cfg.sshCommand, the very same binary `wip` itself uses;
-      #    hardcoding pkgs.openssh here would bypass that agent and fail auth on
-      #    every single tick. BatchMode/ConnectTimeout match the wrapper's, so
-      #    an off-LAN or key-less run fails fast instead of hanging.
+      #    so this restates it via gitSshCommand; hardcoding pkgs.openssh here
+      #    would bypass that agent and fail auth on every single tick.
+      #    BatchMode/ConnectTimeout match the wrapper's, so an off-LAN or
+      #    key-less run fails fast instead of hanging.
+      #
+      #    This is gitSshCommand and NOT cfg.sshCommand, and none of the hub's
+      #    -i/ControlPath options come along: since the hub moved to a dedicated
+      #    on-disk key those are two destinations with two credentials, and
+      #    offering GitHub a key it has never seen — with IdentitiesOnly=yes
+      #    suppressing the one that works — would fail auth on every tick.
       # 2. Its PATH. `ssh.exe` is a BARE NAME, resolvable only through
       #    home.sessionPath — which feeds hm-session-vars.sh, i.e. interactive
       #    and login shells only, never a systemd user unit or a launchd agent.
@@ -112,7 +177,7 @@ let
       # and a unit permanently in `failed` for a reason nobody can act on is
       # just noise that trains you to ignore it.
       PATH="${sessionPathPrefix}$PATH" \
-      GIT_SSH_COMMAND=${lib.escapeShellArg "${cfg.sshCommand} -o BatchMode=yes -o ConnectTimeout=5"} \
+      GIT_SSH_COMMAND=${lib.escapeShellArg "${gitSshCommand} -o BatchMode=yes -o ConnectTimeout=5"} \
         ${pkgs.git}/bin/git -C "$HOME/nixosdotfiles" fetch --quiet \
         || printf 'wip-tick: drift fetch of ~/nixosdotfiles failed (exit %s)\n' "$?" >&2
     ''}
@@ -180,29 +245,63 @@ in
       type = lib.types.str;
       default = "${pkgs.openssh}/bin/ssh";
       description = ''
-        The ssh binary `wip` uses, for both `git push` and `wip_hub_up`.
-        MUST be overridden to "ssh.exe" on artemis (in home/wsl.nix): its
-        1Password agent lives on the Windows host, and Nix's openssh cannot
-        reach it. Getting this wrong makes every push fail authentication
-        silently, visible only in the timer's journal.
+        The ssh binary `wip` uses to reach THE HUB, for both `git push` and
+        `wip_hub_up`.
+
+        Both machines leave this at Nix's openssh, and artemis in particular
+        must NOT be pointed back at `ssh.exe`. It used to be, because the hub
+        was reached with the Windows-side 1Password agent's key — but Windows
+        OpenSSH implements no ControlMaster at all, so multiplexing (the thing
+        that turns ~36 authentications a tick into one) is simply unavailable
+        through it. The hub is now reached with `identityFile` instead, which
+        removes the reason the override existed.
+
+        Note this is the HUB's ssh only. GitHub is a different destination with
+        a different credential; the drift fetch uses `git`'s own
+        core.sshCommand, which on artemis is still `ssh.exe`.
 
         Three constraints on the value:
 
-        1. OpenSSH-CLI-compatible: `wip_hub_up` appends `-o BatchMode=yes
-           -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new` after it,
-           and GIT_SSH_COMMAND appends `-o BatchMode=yes -o ConnectTimeout=5`.
-           `ssh.exe` (Windows OpenSSH) accepts all of these.
+        1. OpenSSH-CLI-compatible: `wip_hub_ssh` prepends `-i … -o
+           IdentitiesOnly=yes -o ControlMaster=auto -o ControlPath=… -o
+           ControlPersist=60`, `wip_hub_up` appends `-o BatchMode=yes -o
+           ConnectTimeout=3 -o StrictHostKeyChecking=accept-new`, and
+           GIT_SSH_COMMAND appends `-o BatchMode=yes -o ConnectTimeout=5`.
         2. A bare binary, NO arguments. git shell-parses GIT_SSH_COMMAND, but
            wip.sh invokes "''${WIP_SSH:-ssh}" as a single quoted word — so a
            value with flags in it would work in git and break every direct ssh
            call site.
         3. Resolvable from a NON-INTERACTIVE PATH. The timer is a systemd user
            unit with no Environment=PATH, so it never sees hm-session-vars.sh.
-           A bare name like `ssh.exe` only works because the wrapper appends
-           config.home.sessionPath to its own PATH; an absolute path is always
-           safe.
+           An absolute store path (the default) is always safe.
       '';
-      example = "ssh.exe";
+    };
+
+    identityFile = lib.mkOption {
+      type = lib.types.str;
+      default = "${config.home.homeDirectory}/.ssh/wip_hub_ed25519";
+      description = ''
+        Private key used for EVERY hub connection, passed as `-i` together with
+        `IdentitiesOnly=yes`.
+
+        A dedicated on-disk key, deliberately not the 1Password agent. Two
+        machines syncing on a five-minute timer should not authenticate with a
+        credential whose whole purpose is to ask a human for approval: with one
+        connection per repo that was ~36 approval prompts a tick on artemis and
+        ~23 on ariane, which is why both timers were stopped.
+
+        `IdentitiesOnly=yes` is not optional. ariane's ~/.ssh/config sets
+        `IdentityAgent` under `Host *`, so ssh would otherwise offer the agent's
+        keys first, the agent would sign, and the prompt would be back despite
+        the `-i`.
+
+        The keypair is NOT generated by Nix — it is a secret, and this repo is
+        public. Create it per machine and authorise the public halves on the hub
+        (machines/gateway/configuration.nix):
+
+          ssh-keygen -t ed25519 -N "" -C "wip@$(hostname)" \
+            -f ~/.ssh/wip_hub_ed25519
+      '';
     };
   };
 
@@ -221,6 +320,21 @@ in
         {
           assertion = !cfg.enable || cfg.host != "";
           message = "kyle.wip.enable is true but kyle.wip.host is unset.";
+        }
+        # Checked at BUILD time because it cannot be caught at run time: over
+        # the limit, ssh exits 255, wip_hub_up reads 255 as "the hub is asleep"
+        # (deliberately — see its comment), and the timer goes silent forever.
+        # 103 = sun_path (104 on macOS) minus the NUL; ssh binds a temporary
+        # "<path>.XXXXXXXXXXXX" first, which is 13 characters longer.
+        {
+          assertion = !cfg.enable || controlPathLen + 13 <= 103;
+          message =
+            "kyle.wip: the ssh ControlPath ${controlPath} expands to "
+            + "${toString controlPathLen} characters, and ssh's temporary "
+            + "'.XXXXXXXXXXXX' variant to ${toString (controlPathLen + 13)} — "
+            + "over the 103-character unix-socket limit on macOS. Every hub "
+            + "operation would fail with exit 255, indistinguishable from an "
+            + "unreachable hub. Shorten xdg.stateHome or the socket name.";
         }
       ];
     }

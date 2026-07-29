@@ -38,10 +38,30 @@ in
 
   # --- Accounts -------------------------------------------------------------
 
-  # Kyle (owner). Base account/groups come from hosts/common.nix; just the key.
+  # Kyle (owner). Base account/groups come from hosts/common.nix; just the keys.
   users.users.kyle = {
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGHjWpYtbVkI+N6NbmnVYvI+YBnpRlnPjaYNFqhNTMqE"
+
+      # === PLACEHOLDER — the `wip` hub keys. UNTIL THESE ARE FILLED IN, `wip`
+      # === ON ARTEMIS AND ARIANE CANNOT REACH THIS HOST AT ALL.
+      #
+      # kyle.wip.identityFile (home/wip.nix) makes both machines authenticate to
+      # the hub with a dedicated on-disk key instead of the 1Password agent —
+      # that is what stopped the five-minute timer asking for an approval per
+      # repo. gateway will reject them until the two PUBLIC halves are listed
+      # here.
+      #
+      # On each machine:
+      #   ssh-keygen -t ed25519 -N "" -C "wip@artemis" -f ~/.ssh/wip_hub_ed25519
+      #   cat ~/.ssh/wip_hub_ed25519.pub
+      # then paste each line below (uncommented) and rebuild gateway:
+      #
+      #   artemis: "ssh-ed25519 AAAA…  wip@artemis"
+      #   ariane:  "ssh-ed25519 AAAA…  wip@ariane"
+      #
+      # Do NOT reuse the personal key above for this: the point of the split is
+      # that the timer's credential is unattended and this one is not.
     ];
   };
 

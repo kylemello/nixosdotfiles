@@ -22,11 +22,43 @@ wip_cmd_push() {
   fi
 }
 
+# Fetch only the repos the other machine actually has a snapshot waiting for.
+#
+# This used to call wip_fetch on EVERY local repo unconditionally, which is one
+# ssh connection and one public-key authentication per repo: measured on artemis
+# 2026-07-28, 36 connections per tick, 32 of them failing outright with
+# "fetch from hub failed" because no bare repo exists on the hub for a slug the
+# other machine has never pushed. Every five minutes, on both machines, each
+# authentication a credential prompt.
+#
+# The census the other host publishes already says which slugs have a snapshot
+# (see wip_manifest_snapshot_slugs), so ONE round-trip answers the question for
+# the whole batch. Against the live manifests on 2026-07-28 that took artemis
+# from 36 per-repo connections a tick to 0.
+#
+# Read ONCE, here, and not inside wip_fetch: per-repo it would cost exactly the
+# round-trip it is meant to save, and it would break wip_fetch's contract of
+# fetching whatever it is handed.
 wip_cmd_fetch_all() {
-  local repo
+  local repo slug published nl=$'\n'
   wip_hub_up || return 0
+  published="$(wip_manifest_snapshot_slugs "$(wip_other_host)")"
   while IFS= read -r repo; do
-    [ -n "$repo" ] && { wip_fetch "$repo" || true; }
+    [ -n "$repo" ] || continue
+    slug="$(wip_slug "$repo")"
+    # Newline-delimited substring match rather than an associative array: this
+    # file is sourced by whatever bash the host has, and bash 3.2 (macOS's
+    # /bin/bash) has no `declare -A`. Slugs are [a-z0-9-] by construction, so
+    # there is nothing for the case pattern to glob on, and the quoting makes it
+    # literal regardless.
+    case "$nl$published$nl" in
+      *"$nl$slug$nl"*) ;;
+      # Not in the census, but our shadow still holds a snapshot from the other
+      # host: fetch once more so --prune can retire it. See
+      # wip_shadow_has_snapshot.
+      *) wip_shadow_has_snapshot "$slug" || continue ;;
+    esac
+    wip_fetch "$repo" || true
   done < <(wip_repos)
 }
 

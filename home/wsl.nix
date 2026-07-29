@@ -63,16 +63,31 @@
     enable = true;
     host = "artemis";
     roots = [ "personal" "work" ];
-    # The Windows-side 1Password agent serves this host's keys; Nix's openssh
-    # cannot reach it. Without this every wip push fails auth silently.
+
+    # sshCommand is deliberately LEFT AT ITS DEFAULT (Nix's openssh) even though
+    # everything else on this host reaches ssh through `ssh.exe` and the
+    # Windows-side 1Password agent. It used to be `sshCommand = "ssh.exe"`;
+    # do not put that back. Three reasons, in order of weight:
     #
-    # This bare name resolves ONLY through home.sessionPath above
-    # (hosts/wsl.nix sets wsl.interop.includePath = false), which nothing
-    # non-interactive sources — so home/wip.nix appends home.sessionPath to the
-    # wrapper's own PATH. Keep that in place or the systemd timer silently
-    # resolves nothing. If ssh.exe ever moves out of the two OpenSSH
-    # directories listed above, add the new one there.
-    sshCommand = "ssh.exe";
+    # 1. Windows OpenSSH implements no ControlMaster. Multiplexing is what turns
+    #    a tick's ~36 SSH authentications into one, and it is simply unavailable
+    #    through ssh.exe — so on this host the fix is impossible without moving
+    #    off it.
+    # 2. The hub is now reached with a dedicated on-disk key
+    #    (kyle.wip.identityFile, ~/.ssh/wip_hub_ed25519), which the agent is not
+    #    involved in at all. Machine-to-machine sync should not authenticate
+    #    with a credential designed to prompt a human for approval.
+    # 3. Nix's ssh resolves `gateway` here perfectly well (10.11.12.105, via the
+    #    lan.kmello.dev search domain — verified 2026-07-28), and wip_hub_up
+    #    passes StrictHostKeyChecking=accept-new, so it seeds its own
+    #    known_hosts entry on the first tick before any git operation runs.
+    #
+    # GitHub is unaffected: programs.git.settings.core.sshCommand above still
+    # points git at ssh.exe, and home/wip.nix's drift fetch reads that same
+    # setting rather than kyle.wip.sshCommand.
+    #
+    # This host cannot reach the hub until ~/.ssh/wip_hub_ed25519 exists here
+    # and its public half is in machines/gateway/configuration.nix.
   };
 
   # Warn at shell start when artemis is running an older nixosdotfiles than the

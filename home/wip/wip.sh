@@ -11,13 +11,12 @@
 #   WIP_CACHE        shadow repos live here
 #   WIP_STATE        per-repo markers live here
 #   WIP_SSH          the ssh command to reach the hub; defaults to plain `ssh`
+#   WIP_SSH_IDENTITY the dedicated hub key; empty = pass no -i (tests)
+#   WIP_SSH_CONTROL  ControlPath for connection multiplexing; empty = off (tests)
 #
-# EVERY ssh invocation below goes through "${WIP_SSH:-ssh}", never bare `ssh`.
-# artemis is WSL and its 1Password SSH agent lives on the Windows side, which is
-# why home/wsl.nix sets git's core.sshCommand to `ssh.exe`. GIT_SSH_COMMAND
-# covers git's own push/fetch, but nothing covers a direct `ssh` call -- those
-# would reach for an agent that is not there and fail authentication. The
-# `:-ssh` default is what keeps the test suite and non-WSL hosts unaffected.
+# EVERY ssh invocation below goes through wip_hub_ssh -- not bare `ssh`, and not
+# a bare "${WIP_SSH:-ssh}" either. See that function for what it adds and why
+# leaving one call site out costs a whole extra SSH handshake per tick.
 
 # Normalize a repo to a stable slug. Derived from `origin` rather than the
 # directory name, because the same project has different directory names on
@@ -59,6 +58,54 @@ wip_url()  { printf 'ssh://%s%s/%s.git' "$WIP_REMOTE_HOST" "$WIP_REMOTE_PATH" "$
 # test would silently make artemis push snapshots to itself instead of
 # gateway — and nothing would ever surface the mistake.
 wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
+
+# The ONE way this file talks to the hub over ssh. Two things it adds, both of
+# which have to be on every single call site or they may as well not be there:
+#
+# 1. -i / IdentitiesOnly=yes. The hub is reached with a DEDICATED on-disk key
+#    (~/.ssh/wip_hub_ed25519), not the 1Password agent. A five-minute timer
+#    authenticating with a credential that exists to ask a human for approval is
+#    the wrong shape: it produced an approval prompt per repo per tick. The
+#    IdentitiesOnly=yes is not decoration -- without it ssh still offers every
+#    agent key first (ariane's ~/.ssh/config sets `IdentityAgent` for `Host *`),
+#    the agent signs, and the prompt is back even though -i was passed.
+#
+# 2. ControlMaster/ControlPath/ControlPersist. Without multiplexing this tool
+#    opens one TCP connection and one public-key authentication PER REPO -- ~36
+#    on artemis, ~23 on ariane, every five minutes. With it, every ssh in a tick
+#    (this file's direct calls AND git's, via GIT_SSH_COMMAND, which home/wip.nix
+#    gives the same options) rides one connection: the first call authenticates
+#    and forks a master, the rest attach to its socket.
+#
+# ControlPersist is deliberately short (60s): it only has to outlive one tick.
+# systemd's oneshot unit kills the master when the tick's ExecStart exits
+# anyway, which is fine -- the sharing that matters is WITHIN a tick.
+#
+# Both are opt-in via the environment so the test suite (which drives a local
+# directory as the hub, and stubs ssh where it does not) is unaffected by
+# default, and so sourcing this file by hand never writes a socket somewhere
+# unexpected.
+wip_hub_ssh() {
+  local ssh="${WIP_SSH:-ssh}" ctldir
+  local -a opts=()
+  if [ -n "${WIP_SSH_IDENTITY:-}" ]; then
+    opts+=(-i "$WIP_SSH_IDENTITY" -o IdentitiesOnly=yes)
+  fi
+  if [ -n "${WIP_SSH_CONTROL:-}" ]; then
+    # ssh does NOT create the ControlPath's parent, and a missing one is fatal
+    # (bind() ENOENT), not a graceful fallback -- so on a machine whose state dir
+    # has not been created yet this would take out every hub operation rather
+    # than just the multiplexing. Parameter expansion, not `dirname`: this runs
+    # on every ssh call and there is no reason to fork for it.
+    ctldir="${WIP_SSH_CONTROL%/*}"
+    [ -d "$ctldir" ] || mkdir -p "$ctldir" 2>/dev/null || true
+    opts+=(-o ControlMaster=auto -o "ControlPath=$WIP_SSH_CONTROL" -o ControlPersist=60)
+  fi
+  # ${opts[@]+"${opts[@]}"} and not "${opts[@]}": an empty array under `set -u`
+  # is an unbound-variable error in bash before 4.4, and the generated `wip`
+  # binary runs with `set -euo pipefail`.
+  "$ssh" ${opts[@]+"${opts[@]}"} "$@"
+}
 
 # --- last successful hub contact ---------------------------------------------
 #
@@ -140,7 +187,7 @@ wip_hub_up() {
   # tell the two kinds of 255 apart -- see below. `|| status=$?` rather than a
   # bare call plus `$?`: this must read the same under `set -e` no matter how
   # the caller invoked us.
-  err="$("$ssh" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+  err="$(wip_hub_ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
       "$WIP_REMOTE_HOST" true 2>&1 >/dev/null)" || status=$?
 
   if [ "$status" -eq 0 ]; then
@@ -244,7 +291,7 @@ wip_ensure_bare() {
   if wip_local_hub; then
     git init --bare -q "$WIP_REMOTE_PATH/$slug.git" 2>/dev/null || true
   else
-    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
+    wip_hub_ssh "$WIP_REMOTE_HOST" "git init --bare -q '$WIP_REMOTE_PATH/$slug.git' 2>/dev/null || true"
   fi
   mkdir -p "$WIP_STATE"; : > "$flag"
 }
@@ -345,6 +392,23 @@ wip_other_host() {
 
 wip_shadow() { printf '%s/%s.git' "$WIP_CACHE" "$1"; }
 
+# Does the shadow cache still hold a snapshot ref from the other host?
+#
+# Purely local -- no network. This exists so the census filter in
+# wip_cmd_fetch_all cannot strand a WITHDRAWN snapshot. When the other host
+# commits its work its tree goes clean, wip_snapshot deletes the hub ref and the
+# census flips to dirty=0; a filter that only looked at the census would then
+# never fetch that slug again, and the stale refs/wip/<other> in our shadow would
+# keep `wip notice` announcing a snapshot that no longer exists (and `wip pull`
+# offering to apply it). One more fetch prunes the ref, after which this returns
+# false and the slug drops out of the batch for good -- self-terminating, so it
+# costs nothing in the steady state.
+wip_shadow_has_snapshot() {
+  local shadow; shadow="$(wip_shadow "$1")"
+  [ -d "$shadow" ] || return 1
+  git --git-dir="$shadow" rev-parse --verify --quiet "refs/wip/$(wip_other_host)" >/dev/null 2>&1
+}
+
 wip_manifest_path() { printf '%s/_manifest/%s.tsv' "$WIP_REMOTE_PATH" "$1"; }
 
 # Publish this machine's repo census: every repo, dirty or not. `wip clone`
@@ -413,17 +477,17 @@ wip_manifest_write() {
     # exactly this kind of failure.)
     remote_dest="$(wip_manifest_path "$WIP_HOST")"
     remote_tmp="$remote_dest.$$.tmp"
-    if ! "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" \
+    if ! wip_hub_ssh "$WIP_REMOTE_HOST" \
         "mkdir -p '$WIP_REMOTE_PATH/_manifest' && cat > '$remote_tmp'" < "$out"; then
       printf 'wip: manifest: hub unreachable, not published\n' >&2
       rm -f "$out"
-      "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
+      wip_hub_ssh "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
       return 1
     fi
     rm -f "$out"
-    if ! "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "mv '$remote_tmp' '$remote_dest'"; then
+    if ! wip_hub_ssh "$WIP_REMOTE_HOST" "mv '$remote_tmp' '$remote_dest'"; then
       printf 'wip: manifest: hub unreachable, not published\n' >&2
-      "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
+      wip_hub_ssh "$WIP_REMOTE_HOST" "rm -f '$remote_tmp'" 2>/dev/null || true
       return 1
     fi
   fi
@@ -441,8 +505,41 @@ wip_manifest_read() {
   if wip_local_hub; then
     cat "$(wip_manifest_path "$host")" 2>/dev/null || true
   else
-    "${WIP_SSH:-ssh}" "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
+    wip_hub_ssh "$WIP_REMOTE_HOST" "cat '$(wip_manifest_path "$host")' 2>/dev/null" || true
   fi
+}
+
+# The slugs the other host currently has a snapshot waiting on the hub for.
+#
+# The census carries a `dirty` column, and dirty is exactly the condition under
+# which wip_snapshot pushes: a clean tree makes it DELETE its hub ref instead.
+# So dirty=1 is the manifest's answer to "is there a snapshot for this slug",
+# and it is the only answer available without one ssh round-trip per repo --
+# which is the whole point (see wip_cmd_fetch_all in main.sh).
+#
+# Reads the census ONCE. Callers must not invoke this per repo.
+#
+# Split by parameter expansion and NOT by `IFS=$'\t' read -r slug url rel dirty
+# head`, which is the obvious way to write this and is wrong. TAB is one of the
+# shell's IFS *whitespace* characters, so a run of them collapses into a single
+# delimiter no matter that IFS names only the tab -- and the url column is empty
+# for every repo with no `origin`. Measured against the live ariane census on
+# 2026-07-28: `IFS=$'\t' read` shifted those rows left by one and read the head
+# SHA as the dirty flag, silently dropping 2 of 7 waiting snapshots
+# (personal-inventori, personal-laravel-app) -- exactly the repos whose only copy
+# is the other machine's. Trailing fields are not needed, so peel four.
+wip_manifest_snapshot_slugs() {
+  local host="$1" line slug rest dirty
+  while IFS= read -r line; do
+    slug="${line%%$'\t'*}"
+    [ -n "$slug" ] || continue
+    rest="${line#*$'\t'}"    # url onward
+    rest="${rest#*$'\t'}"    # rel onward
+    rest="${rest#*$'\t'}"    # dirty onward
+    dirty="${rest%%$'\t'*}"
+    [ "$dirty" = "1" ] || continue
+    printf '%s\n' "$slug"
+  done < <(wip_manifest_read "$host")
 }
 
 # Pull the other host's snapshot into a shadow repo under $WIP_CACHE. The real
@@ -453,6 +550,13 @@ wip_manifest_read() {
 # reported non-zero with a diagnostic, not swallowed as success -- a caller
 # that trusts a silent "ok" here would tell the user their WIP is current
 # when nothing was actually fetched.
+#
+# UNCONDITIONAL by contract: given a repo, it fetches, full stop. The decision
+# about WHICH repos are worth a connection belongs to the batch caller
+# (wip_cmd_fetch_all), which can amortise one census read over all of them;
+# moving it in here would mean one ssh round-trip per repo to answer a question
+# one round-trip already answers for the lot. Single-repo callers (and the test
+# suite) depend on this staying unconditional.
 wip_fetch() {
   local repo="$1" slug shadow target
   slug="$(wip_slug "$repo")"
