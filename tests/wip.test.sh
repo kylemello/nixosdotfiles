@@ -432,7 +432,7 @@ check "notice: reports the waiting snapshot from the other host" \
 
 wip_safety_ref "$REPO" "$SHADOW"
 check "safety: ref created" \
-  "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null && echo yes || echo no)" \
+  "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip-safety/pre-pull >/dev/null && echo yes || echo no)" \
   "yes"
 # The ref must capture the live WORKING TREE, not HEAD. Asserted against the
 # ref's TREE rather than a file on disk on purpose: `git checkout <tree-ish> -- .`
@@ -440,9 +440,9 @@ check "safety: ref created" \
 # that exists only locally is never at risk, and checking that it is still there
 # after a restore would prove nothing.
 check "safety: ref captures untracked work" \
-  "$(git --git-dir="$SHADOW" ls-tree -r --name-only refs/wip/pre-pull | grep -c '^scratch\.txt$')" "1"
+  "$(git --git-dir="$SHADOW" ls-tree -r --name-only refs/wip-safety/pre-pull | grep -c '^scratch\.txt$')" "1"
 check "safety: ref honours .gitignore" \
-  "$(git --git-dir="$SHADOW" ls-tree -r --name-only refs/wip/pre-pull | grep -c node_modules)" "0"
+  "$(git --git-dir="$SHADOW" ls-tree -r --name-only refs/wip-safety/pre-pull | grep -c node_modules)" "0"
 # Every blob the ref names has to be in the SHADOW's object store, or `wip undo`
 # is a safety net that looks present and tears the moment it is used. An index
 # seeded from the real repo's HEAD (instead of `add -A` against the live work
@@ -454,7 +454,7 @@ check "safety: ref honours .gitignore" \
 # is itself absent makes ls-tree print nothing at all -- "found no missing
 # objects" would then pass for the very worst case.
 check "safety: the ref's blobs all live in the shadow" \
-  "$(git --git-dir="$SHADOW" ls-tree -r refs/wip/pre-pull | awk '{print $3}' \
+  "$(git --git-dir="$SHADOW" ls-tree -r refs/wip-safety/pre-pull | awk '{print $3}' \
      | while read -r o; do git --git-dir="$SHADOW" cat-file -e "$o" 2>/dev/null && echo present; done \
      | grep -c present)" "3"
 
@@ -475,11 +475,117 @@ git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/otherhost -- .
 check "safety: pull overwrites the tracked file"   "$(cat "$REPO/tracked.txt")" "from-other"
 check "safety: pull overwrites the untracked file" "$(cat "$REPO/scratch.txt")" "other-scratch"
 
-git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip/pre-pull -- .
+git --git-dir="$SHADOW" --work-tree="$REPO" checkout refs/wip-safety/pre-pull -- .
 check "safety: undo restores the tracked file"   "$(cat "$REPO/tracked.txt")" "my-local-work"
 check "safety: undo restores the untracked file" "$(cat "$REPO/scratch.txt")" "my-scratch"
+# `^refs/wip` and not `^refs/wip/`: the safety ref now lives in a SECOND
+# namespace (refs/wip-safety/), and this assertion has to cover both or half of
+# what it guards against stops being visible.
 check "safety: real repo still has no refs of its own" \
-  "$(git -C "$REPO" for-each-ref --format='%(refname)' | grep -c '^refs/wip/')" "0"
+  "$(git -C "$REPO" for-each-ref --format='%(refname)' | grep -c '^refs/wip')" "0"
+teardown
+
+# --- `wip undo` has to survive the next timer tick ---------------------------
+# Regression test for: wip_fetch fetches 'refs/heads/wip/*:refs/wip/*' with
+# --prune, and the safety ref used to be written to refs/wip/pre-pull -- inside
+# that same namespace, and never present on the hub. Every fetch therefore
+# deleted it. Measured before the fix:
+#
+#   before fetch --prune:  refs/wip/otherhost  refs/wip/pre-pull
+#   after  fetch --prune:  refs/wip/otherhost
+#
+# `wip pull` is the one operation in this tool that can destroy uncommitted
+# work; it told the user `wip undo` would bring the tree back, and the next
+# five-minute tick silently threw the safety net away.
+#
+# This drives the REAL sequence -- pull, tick, undo -- and asserts on the FILES.
+# Asserting the ref merely exists would not be enough: a ref that survives but
+# that `wip undo` no longer looks at, or whose blobs have been collected, passes
+# an existence check and still loses the work. (main.sh was sourced above.)
+setup
+printf 'from-other\n'    > "$REPO/tracked.txt"
+printf 'other-scratch\n' > "$REPO/scratch.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+
+# Diverge locally: the work the pull is about to overwrite, tracked and
+# untracked alike.
+printf 'my-local-work\n' > "$REPO/tracked.txt"
+printf 'my-scratch\n'    > "$REPO/scratch.txt"
+
+( cd "$REPO" && wip_cmd_pull --force <<<y ) >/dev/null 2>&1
+check "undo: the pull really did overwrite the tree first" \
+  "$(cat "$REPO/tracked.txt")" "from-other"
+
+# THE TICK. Nothing exotic: one ordinary fetch, the thing the timer runs on its
+# own five minutes later whether or not the user does anything.
+wip_fetch "$REPO"
+
+UNDO_OUT="$( ( cd "$REPO" && wip_cmd_undo <<<y ) 2>&1 )"
+check "undo: a fetch tick does not retire the pre-pull snapshot" \
+  "$(printf '%s\n' "$UNDO_OUT" | grep -c 'no pre-pull snapshot')" "0"
+check "undo: restores the tracked file after a fetch tick" \
+  "$(cat "$REPO/tracked.txt")" "my-local-work"
+check "undo: restores the untracked file after a fetch tick" \
+  "$(cat "$REPO/scratch.txt")" "my-scratch"
+# --prune must keep doing its job; the fix is the namespace, not a weaker fetch.
+check "undo: the fetch tick still prunes withdrawn hub snapshots" \
+  "$(git -C "$BARE" update-ref -d refs/heads/wip/otherhost; wip_fetch "$REPO"; \
+     git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip/otherhost >/dev/null 2>&1 \
+     && echo present || echo gone)" "gone"
+teardown
+
+# --- an origin-less census row must not shift `wip clone`'s columns ----------
+# Regression test for: wip_missing parsed the manifest with
+# `IFS=$'\t' read -r slug url rel dirty head`. TAB is one of the shell's IFS
+# *whitespace* characters, so a RUN of tabs collapses into one delimiter -- and
+# the url column is empty for every repo with no `origin`. Such a row arrived
+# shifted one field left: `rel` was read as the url and the dirty flag as the
+# rel, so `wip clone` offered `git clone work/originless ~/1` -- a relative path
+# used as a clone URL, into a directory named after a boolean. Same trap and the
+# same parameter-expansion fix as wip_manifest_snapshot_slugs; the two parsers
+# have to stay consistent. (main.sh was sourced above.)
+setup
+mkdir -p "$WIP_REMOTE_PATH/_manifest"
+HEADSHA="$(git -C "$REPO" rev-parse HEAD)"
+{
+  # Genuinely absent here, with a real origin: the one true clone candidate.
+  printf 'github-com-acme-absent\thttps://github.com/acme/Absent.git\twork/absent\t1\t%s\n' "$HEADSHA"
+  # ORIGIN-LESS -- two adjacent tabs. There is nothing to clone from, so this
+  # row must vanish rather than be read one column over.
+  printf 'work-originless\t\twork/originless\t1\t%s\n' "$HEADSHA"
+  # Already present here; dropped on the -e test whatever the parse does.
+  printf '%s\thttps://github.com/acme/Demo-App.git\twork/demo\t0\t%s\n' "$(wip_slug "$REPO")" "$HEADSHA"
+  # Malformed: fewer than the five columns wip_manifest_write writes. Peeling
+  # past the end of a string leaves it unchanged, so without an explicit
+  # field-count guard the url would silently duplicate itself into the rel.
+  printf 'short-row\thttps://github.com/acme/Short.git\n'
+} > "$WIP_REMOTE_PATH/_manifest/otherhost.tsv"
+
+check "missing: an origin-less row is dropped, not shifted into a candidate" \
+  "$(wip_missing | cut -f1 | grep -c '^work-originless$')" "0"
+check "missing: never puts a relative path where a clone URL belongs" \
+  "$(wip_missing | cut -f2 | grep -c '^work/')" "0"
+check "missing: a malformed short row is dropped" \
+  "$(wip_missing | cut -f1 | grep -c '^short-row$')" "0"
+check "missing: and the repo that really is absent is still reported, in full" \
+  "$(wip_missing)" \
+  "$(printf 'github-com-acme-absent\thttps://github.com/acme/Absent.git\twork/absent')"
+
+# Through the verb the user actually types. `n` at the prompt, so nothing is
+# cloned -- the listing is the whole point, since that listing is what was
+# printing `work/originless  ->  ~/1`.
+CLONE_LIST="$( ( cd "$SANDBOX" && wip_cmd_clone <<<n ) 2>&1 )"
+check "clone: offers the missing repo by its real origin URL" \
+  "$(printf '%s\n' "$CLONE_LIST" | grep -c '^  https://github.com/acme/Absent.git  ->  ~/work/absent$')" "1"
+check "clone: and offers nothing else" \
+  "$(printf '%s\n' "$CLONE_LIST" | grep -c ' ->  ~/')" "1"
+check "clone: bare \`wip\` counts the same repos \`wip clone\` would offer" \
+  "$( ( cd "$SANDBOX" && wip_cmd_status ) 2>/dev/null | grep -c 'otherhost has 1 repo(s) you do not')" "1"
 teardown
 
 # --- the hard guarantee, part 2: the verbs that run `git status` -------------

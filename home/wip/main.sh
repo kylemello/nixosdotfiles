@@ -80,6 +80,20 @@ wip_cmd_diff() {
 # --work-tree, so the objects land in the cache and the real repo is only ever
 # read. .gitignore still applies, because `add -A` reads the ignore files out
 # of the work tree.
+#
+# The ref lives under refs/wip-safety/, NOT refs/wip/, and that is the whole
+# point of the odd namespace. wip_fetch fetches 'refs/heads/wip/*:refs/wip/*'
+# with --prune, and this ref exists ONLY here -- the hub has never heard of it --
+# so inside refs/wip/ every fetch deletes it. Measured:
+#
+#   before fetch --prune:  refs/wip/other  refs/wip/pre-pull
+#   after  fetch --prune:  refs/wip/other
+#
+# i.e. `wip pull` saved your tree, told you `wip undo` would bring it back, and
+# the next five-minute timer tick silently threw it away. Weakening --prune is
+# not the fix: it is what retires a snapshot the other host has withdrawn (see
+# wip_shadow_has_snapshot). Keeping the safety ref out of the pruned namespace
+# is. Anything that reads or writes it must use refs/wip-safety/pre-pull.
 # Every step is guarded and the function returns non-zero on any failure. This
 # is the guard on a destructive operation: if it silently half-worked, `wip pull`
 # would overwrite the working tree and then claim the previous state was saved.
@@ -118,8 +132,8 @@ wip_safety_ref() {
     printf 'wip: %s: commit-tree failed for the safety ref\n' "$repo" >&2
     return 1
   fi
-  if ! git --git-dir="$shadow" update-ref refs/wip/pre-pull "$sha"; then
-    printf 'wip: %s: could not write refs/wip/pre-pull\n' "$repo" >&2
+  if ! git --git-dir="$shadow" update-ref refs/wip-safety/pre-pull "$sha"; then
+    printf 'wip: %s: could not write refs/wip-safety/pre-pull\n' "$repo" >&2
     return 1
   fi
 }
@@ -166,7 +180,7 @@ wip_cmd_pull() {
          # shown above the prompt, and the "applied" below, described the whole
          # tree. `:/` always means the top of the work tree, whatever the CWD.
          git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- :/ \
-           || { echo "wip: checkout failed; your tree is saved at refs/wip/pre-pull (\`wip undo\`)." >&2; return 1; }
+           || { echo "wip: checkout failed; your tree is saved at refs/wip-safety/pre-pull (\`wip undo\`)." >&2; return 1; }
          echo "wip: applied. Previous tree saved — \`wip undo\` restores it." ;;
     *)   echo "wip: aborted." ;;
   esac
@@ -178,17 +192,19 @@ wip_cmd_undo() {
   repo="$(wip_cwd_repo)"
   [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
   slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
-  git --git-dir="$shadow" rev-parse --verify --quiet refs/wip/pre-pull >/dev/null 2>&1 \
+  # refs/wip-safety/, not refs/wip/ -- see wip_safety_ref: the latter is the
+  # namespace wip_fetch --prunes, which used to delete this ref within one tick.
+  git --git-dir="$shadow" rev-parse --verify --quiet refs/wip-safety/pre-pull >/dev/null 2>&1 \
     || { echo "wip: no pre-pull snapshot for this repo"; return 0; }
 
-  echo "Restoring the tree from $(git --git-dir="$shadow" log -1 --format=%s refs/wip/pre-pull):"
-  wip_shadow_diff "$repo" refs/wip/pre-pull --stat
+  echo "Restoring the tree from $(git --git-dir="$shadow" log -1 --format=%s refs/wip-safety/pre-pull):"
+  wip_shadow_diff "$repo" refs/wip-safety/pre-pull --stat
   printf 'Restore? [y/N] '
   read -r reply
   case "$reply" in
     y|Y) # `:/`, not `.` -- same reason as wip_cmd_pull: restore the whole tree
          # regardless of which subdirectory this was run from.
-         git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip/pre-pull -- :/
+         git --git-dir="$shadow" --work-tree="$repo" checkout refs/wip-safety/pre-pull -- :/
          echo "wip: restored." ;;
     *)   echo "wip: aborted." ;;
   esac
@@ -196,11 +212,33 @@ wip_cmd_undo() {
 
 # Repos that exist on the other machine but not here.
 wip_missing() {
-  local other slug url rel dirty head
+  local other line slug url rel rest
   other="$(wip_other_host)"
-  while IFS=$'\t' read -r slug url rel dirty head; do
+  while IFS= read -r line; do
+    # Peeled by parameter expansion, NOT read with `IFS=$'\t' read -r slug url
+    # rel dirty head` -- the same trap, and the same fix, as
+    # wip_manifest_snapshot_slugs in wip.sh; the two must stay consistent. TAB
+    # is one of the shell's IFS *whitespace* characters, so `read` collapses a
+    # RUN of tabs into a single delimiter even when IFS names nothing else, and
+    # the url column is empty for every repo with no `origin`. Such a row
+    # arrived shifted one field left: `rel` was read as the dirty flag and
+    # `wip clone` offered nonsense like `git clone work/b ~/1` -- i.e. it would
+    # have cloned a path as if it were a URL, into a directory named after a
+    # boolean.
+    #
+    # A row with fewer than the manifest's five fields is malformed rather than
+    # merely origin-less, and peeling past the end of a string leaves it
+    # unchanged (so the last field would silently duplicate into the next one).
+    # Require all four separators up front instead.
+    case "$line" in *$'\t'*$'\t'*$'\t'*$'\t'*) ;; *) continue ;; esac
+    slug="${line%%$'\t'*}"
     [ -n "$slug" ] || continue
-    [ -n "$url" ]  || continue          # no origin: nothing to clone from
+    rest="${line#*$'\t'}"               # url onward
+    url="${rest%%$'\t'*}"
+    [ -n "$url" ] || continue           # no origin: nothing to clone from
+    rest="${rest#*$'\t'}"               # rel onward
+    rel="${rest%%$'\t'*}"
+    [ -n "$rel" ] || continue
     [ -e "$HOME/$rel" ] && continue
     printf '%s\t%s\t%s\n' "$slug" "$url" "$rel"
   done < <(wip_manifest_read "$other")
@@ -208,6 +246,10 @@ wip_missing() {
 
 wip_cmd_clone() {
   local slug url rel n=0 reply
+  # `IFS=$'\t' read` is safe HERE, unlike against the raw manifest above: this
+  # reads wip_missing's own three-column output, and wip_missing skips any row
+  # with an empty slug, url or rel -- so there is never a run of tabs to
+  # collapse. Point it at a manifest line instead and the bug is back.
   while IFS=$'\t' read -r slug url rel; do
     [ -n "$rel" ] || continue
     printf '  %s  ->  ~/%s\n' "$url" "$rel"; n=$((n+1))

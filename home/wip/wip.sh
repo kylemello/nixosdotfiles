@@ -573,6 +573,11 @@ wip_fetch() {
       return 1
     fi
   fi
+  # --prune owns refs/wip/* OUTRIGHT: any ref under it that the hub does not
+  # have is deleted here, every tick. That is deliberate (it is what retires a
+  # snapshot the other host withdrew -- see wip_shadow_has_snapshot), so nothing
+  # purely local may be stored in this namespace. `wip undo`'s safety ref learnt
+  # that the hard way and now lives in refs/wip-safety/ (see wip_safety_ref).
   if ! git --git-dir="$shadow" fetch --quiet --prune --force \
       "$target" 'refs/heads/wip/*:refs/wip/*' 2>/dev/null; then
     printf 'wip: %s: fetch from hub failed, will retry next run\n' "$repo" >&2
