@@ -43,25 +43,18 @@ in
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGHjWpYtbVkI+N6NbmnVYvI+YBnpRlnPjaYNFqhNTMqE"
 
-      # === PLACEHOLDER — the `wip` hub keys. UNTIL THESE ARE FILLED IN, `wip`
-      # === ON ARTEMIS AND ARIANE CANNOT REACH THIS HOST AT ALL.
+      # The `wip` hub keys — dedicated, on-disk, one per machine, generated
+      # 2026-07-28. kyle.wip.identityFile (home/wip.nix) points at the private
+      # halves and passes -o IdentitiesOnly=yes, so the timer authenticates with
+      # these and never falls back to the 1Password agent.
       #
-      # kyle.wip.identityFile (home/wip.nix) makes both machines authenticate to
-      # the hub with a dedicated on-disk key instead of the 1Password agent —
-      # that is what stopped the five-minute timer asking for an approval per
-      # repo. gateway will reject them until the two PUBLIC halves are listed
-      # here.
-      #
-      # On each machine:
-      #   ssh-keygen -t ed25519 -N "" -C "wip@artemis" -f ~/.ssh/wip_hub_ed25519
-      #   cat ~/.ssh/wip_hub_ed25519.pub
-      # then paste each line below (uncommented) and rebuild gateway:
-      #
-      #   artemis: "ssh-ed25519 AAAA…  wip@artemis"
-      #   ariane:  "ssh-ed25519 AAAA…  wip@ariane"
-      #
-      # Do NOT reuse the personal key above for this: the point of the split is
-      # that the timer's credential is unattended and this one is not.
+      # That split is the whole point. `wip fetch` opened one SSH connection per
+      # repo, so the five-minute timer was asking for ~24 agent approvals a tick
+      # (~290/hour) on each machine. These keys are unattended by design; the
+      # personal key above stays interactive and keeps guarding GitHub and commit
+      # signing. Do not merge the two.
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDTZebyqlUOmMBvcDueCeiG2ErR7ln0jj4MzNa75tEGJ wip-hub@artemis"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICzxyzkF5IM+i6kbTQCQgLvyztjmYQc2xK/wW+mMvuCZ wip-hub@ariane"
     ];
   };
 
