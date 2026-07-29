@@ -94,14 +94,25 @@ wip_safety_ref() {
 
 # Deliberate by design: never overwrite a working tree without consent.
 wip_cmd_pull() {
-  local repo slug shadow force="${1:-}" reply
+  local repo slug shadow force="${1:-}" reply porcelain
   repo="$(wip_cwd_repo)"
   [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
   slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
   git --git-dir="$shadow" rev-parse --verify --quiet "refs/wip/$(wip_other_host)" >/dev/null 2>&1 \
     || { echo "wip: no snapshot from $(wip_other_host) for this repo"; return 0; }
 
-  if [ -n "$(git -C "$repo" status --porcelain)" ] && [ "$force" != "--force" ]; then
+  # `--no-optional-locks`, same as wip_manifest_write and for the same reason: a
+  # plain `git status` rewrites .git/index when the stat cache is stale, and
+  # this tool must never write to the user's repo outside the deliberate
+  # checkout below. The exit status is checked too -- an empty stdout from a
+  # FAILED status reads as "clean tree", and this is the gate standing in front
+  # of the one operation here that can destroy uncommitted work.
+  if ! porcelain="$(git --no-optional-locks -C "$repo" status --porcelain)"; then
+    echo "wip: cannot tell whether your working tree is clean (git status failed)." >&2
+    echo "     Refusing to overwrite it. Re-run with --force if you are sure." >&2
+    [ "$force" = "--force" ] || return 1
+  fi
+  if [ -n "$porcelain" ] && [ "$force" != "--force" ]; then
     echo "wip: your working tree has changes."
     echo "     Review with \`wip diff\`, then re-run with --force to overwrite."
     return 1
@@ -181,7 +192,14 @@ wip_cmd_clone() {
 
 # Bare `wip`: in a repo, report on it. Elsewhere, report on everything.
 wip_cmd_status() {
-  local repo n=0 notice slug url rel
+  local repo n=0 notice slug url rel stale
+  # First line, and in BOTH branches below, because "why has nothing happened?"
+  # is asked from inside a repo at least as often as outside one. This is the
+  # half of the C-1 fix that does not depend on classifying ssh's stderr
+  # correctly: however wip_hub_up failed, the stamp did not move, and the user
+  # gets "last reached the hub 3 days ago" instead of an unexplained silence.
+  stale="$(wip_hub_staleness)"
+  if [ -n "$stale" ]; then printf '%s\n' "$stale"; fi
   repo="$(wip_cwd_repo)"
   if [ -n "$repo" ]; then
     notice="$(wip_notice "$repo")"

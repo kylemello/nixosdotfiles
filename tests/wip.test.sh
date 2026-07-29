@@ -93,6 +93,40 @@ SPY
   return "$rc"
 }
 
+# Make a repo's index stat cache deliberately STALE, so that a `git status`
+# which is missing --no-optional-locks will actually rewrite .git/index.
+#
+# This is the difference between an index assertion that means something and one
+# that cannot fail. git only writes the index when refreshing it CHANGED it: if
+# the cached stat data still matches the files on disk (a "warm" cache), even a
+# fully unflagged `git status` leaves the file byte-identical. Backdating every
+# working-tree file makes the cache mismatch, so git re-hashes, finds the
+# content unchanged, and writes the refreshed stat back.
+#
+# Measured on git 2.54.0 against this suite's fixture repo:
+#   warm cache  + `git status`                     -> index cksum SAME
+#   stale cache + `git status`                     -> index cksum CHANGED
+#   stale cache + `git --no-optional-locks status` -> index cksum SAME
+# The first line is why the original "repo untouched: index" assertion was
+# vacuous: it captured the cksum on the line directly after a `git status`.
+#
+# A backdated `-t` rather than a bare `touch`: a file whose mtime is the CURRENT
+# second is "racily clean", which git handles by a different path. `-exec ... +`
+# rather than xargs, so this works with BSD find on ariane as well as GNU.
+#
+# The timestamp ADVANCES on every call, and that is load-bearing when a block
+# makes several index assertions in a row: a call that reused the same
+# timestamp would be a no-op against an index that had already absorbed it
+# (verified -- reverting the flag at BOTH sites then failed only the first
+# assertion, because the first unflagged `git status` wrote the backdated stat
+# into the index and re-staling to the same value left the cache warm).
+STALE_N=0
+stale_index() {
+  STALE_N=$((STALE_N + 1))
+  find "$1" -name .git -prune -o -type f \
+    -exec touch -t "$(printf '2020010100%02d' "$STALE_N")" {} +
+}
+
 setup() {
   SANDBOX="$(mktemp -d)"
   export HOME="$SANDBOX/home"
@@ -141,17 +175,22 @@ BEFORE_REMOTES="$(git -C "$REPO" remote -v)"
 BEFORE_BRANCHES="$(git -C "$REPO" branch -a)"
 BEFORE_ALLREFS="$(git -C "$REPO" for-each-ref)"
 BEFORE_HEAD="$(git -C "$REPO" rev-parse HEAD)"
-BEFORE_STATUS="$(git -C "$REPO" status --porcelain)"
+# The HARNESS's own probes go through --no-optional-locks as well. A plain
+# `git status` here would warm the stat cache (and rewrite the index itself),
+# which is exactly what made the index assertion below unfalsifiable before.
+BEFORE_STATUS="$(git --no-optional-locks -C "$REPO" status --porcelain)"
+stale_index "$REPO"
 BEFORE_INDEX="$(cksum < "$REPO/.git/index")"
 
 wip_snapshot "$REPO"
 
+# Index FIRST, before any other probe can perturb it.
+check "repo untouched: index"     "$(cksum < "$REPO/.git/index")"     "$BEFORE_INDEX"
 check "repo untouched: remotes"   "$(git -C "$REPO" remote -v)"        "$BEFORE_REMOTES"
 check "repo untouched: branches"  "$(git -C "$REPO" branch -a)"        "$BEFORE_BRANCHES"
 check "repo untouched: all refs"  "$(git -C "$REPO" for-each-ref)"     "$BEFORE_ALLREFS"
 check "repo untouched: HEAD"      "$(git -C "$REPO" rev-parse HEAD)"   "$BEFORE_HEAD"
-check "repo untouched: status"    "$(git -C "$REPO" status --porcelain)" "$BEFORE_STATUS"
-check "repo untouched: index"     "$(cksum < "$REPO/.git/index")"     "$BEFORE_INDEX"
+check "repo untouched: status"    "$(git --no-optional-locks -C "$REPO" status --porcelain)" "$BEFORE_STATUS"
 
 # --- snapshot content --------------------------------------------------------
 BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
@@ -443,6 +482,101 @@ check "safety: real repo still has no refs of its own" \
   "$(git -C "$REPO" for-each-ref --format='%(refname)' | grep -c '^refs/wip/')" "0"
 teardown
 
+# --- the hard guarantee, part 2: the verbs that run `git status` -------------
+# The block near the top of this file only ever drives wip_snapshot, which never
+# runs `git status` -- so it could not see the real breach: `git status`
+# REWRITES .git/index whenever the stat cache is stale, and takes
+# .git/index.lock to do it. wip_manifest_write does that against EVERY repo on
+# EVERY five-minute tick, and wip_cmd_pull does it in its dirty-tree gate.
+# Beyond breaking this tool's one hard promise, the lock races whatever git
+# command the user happens to be running ("Unable to create '.git/index.lock':
+# File exists"). `git --no-optional-locks status` is the fix.
+#
+# Every assertion here calls stale_index first (see its comment): without that
+# the cache is warm, an unflagged `git status` is a no-op on the index file, and
+# these assertions would pass whether the flag were present or not -- the same
+# defect they exist to catch, one level up. Mutation-checked: reverting
+# --no-optional-locks at either call site fails the matching assertion below.
+# (main.sh was sourced in the section above.)
+setup
+printf 'dirty\n' > "$REPO/tracked.txt"
+printf 'new\n'   > "$REPO/untracked.txt"
+
+# A snapshot from "the other host", so wip_cmd_pull gets past its ref gate and
+# actually reaches the `git status` under test.
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+wip_fetch "$REPO"
+
+stale_index "$REPO"
+IDX="$(cksum < "$REPO/.git/index")"
+wip_manifest_write >/dev/null 2>&1
+check "no-lock: wip_manifest_write leaves .git/index byte-identical" \
+  "$(cksum < "$REPO/.git/index")" "$IDX"
+# Anti-vacuity: prove the call above actually did its work rather than bailing
+# out early, which would make the assertion true for the wrong reason.
+check "no-lock: ...and it really did publish a census" \
+  "$([ -s "$WIP_REMOTE_PATH/_manifest/testhost.tsv" ] && echo yes || echo no)" "yes"
+
+stale_index "$REPO"
+IDX="$(cksum < "$REPO/.git/index")"
+# Dirty tree, no --force: refuses at the status gate, so nothing destructive
+# runs -- but the `git status` on the line under test does.
+PULL_GATE_RC=0
+( cd "$REPO" && wip_cmd_pull ) >/dev/null 2>&1 || PULL_GATE_RC=$?
+check "no-lock: wip pull's dirty-tree gate leaves .git/index byte-identical" \
+  "$(cksum < "$REPO/.git/index")" "$IDX"
+check "no-lock: ...and the gate really did fire (it saw the dirty tree)" \
+  "$PULL_GATE_RC" "1"
+
+# The whole tick, exactly as the timer runs it: discovery, snapshot of every
+# repo, then the manifest write. This is the statement that matters -- five
+# minutes apart, forever, against the user's real repos.
+printf 'dirtier\n' > "$REPO/tracked.txt"
+stale_index "$REPO"
+IDX="$(cksum < "$REPO/.git/index")"
+wip_cmd_push --all >/dev/null 2>&1
+check "no-lock: a whole \`wip push --all\` tick leaves .git/index byte-identical" \
+  "$(cksum < "$REPO/.git/index")" "$IDX"
+check "no-lock: ...and the tick really did push a new snapshot" \
+  "$(git -C "$BARE" rev-parse --verify --quiet refs/heads/wip/testhost >/dev/null && echo yes || echo no)" \
+  "yes"
+teardown
+
+# --- manifest: a failing `git status` is not "clean" -------------------------
+# The dirty flag used to be decided purely by whether stdout was empty, with the
+# exit status ignored -- so a repo git could not read reported dirty=0, i.e.
+# "nothing waiting here", the exact opposite of the truth, to the other machine.
+# A one-byte .git/index makes `git status` die ("index file smaller than
+# expected") while `git rev-parse HEAD` still succeeds, so the repo gets past
+# the loop's HEAD gate and reaches the line under test.
+setup
+REPO2="$HOME/work/demo2"
+mkdir -p "$REPO2"
+git -C "$REPO2" init -q -b main
+git -C "$REPO2" config user.email t@t; git -C "$REPO2" config user.name t
+git -C "$REPO2" remote add origin https://github.com/acme/Clean-App.git
+printf 'v1\n' > "$REPO2/tracked.txt"
+git -C "$REPO2" add -A; git -C "$REPO2" commit -qm init
+
+printf 'x' > "$REPO/.git/index"     # corrupt, but HEAD still resolves
+MAN_ERR="$SANDBOX/man.err"
+wip_manifest_write 2>"$MAN_ERR"
+MAN_RC=$?
+MAN="$WIP_REMOTE_PATH/_manifest/testhost.tsv"
+
+check "manifest: an unreadable repo is NOT recorded as clean" \
+  "$(awk -F'\t' -v s="$(wip_slug "$REPO")" '$1==s{print $4}' "$MAN")" ""
+check "manifest: the healthy repo is still published" \
+  "$(awk -F'\t' -v s="$(wip_slug "$REPO2")" '$1==s{print $4}' "$MAN")" "0"
+check "manifest: the omission is reported on stderr, naming the repo" \
+  "$(grep -c "$REPO: git status failed" "$MAN_ERR")" "1"
+check "manifest: and the write reports non-zero rather than a clean success" \
+  "$MAN_RC" "1"
+teardown
+
 # --- batch resilience --------------------------------------------------------
 # Off-LAN every push fails, so per-repo tolerance is load-bearing. This drives
 # wip_cmd_push itself: an inlined copy of its loop would keep passing with the
@@ -640,6 +774,76 @@ check "ssh-missing: an unreachable hub still returns non-zero" "$ASLEEP_STATUS" 
 check "ssh-missing: an unreachable hub stays quiet (no diagnostic)" \
   "$(wc -c <"$ASLEEP_ERR" | tr -d ' ')" "0"
 
+# 255 AGAIN -- but from a rejected key rather than an absent host. OpenSSH
+# returns 255 for both, so an allow-list keyed on the exit status alone reads a
+# broken agent as "hub away" and the timer runs every five minutes forever
+# pushing nothing and logging nothing. Third route to the same silent-timer bug
+# after 127 and 126, and the only one that reproduced on the real machine: this
+# is verbatim what artemis's probe printed from a systemd user unit, where the
+# Windows 1Password agent would not sign for gateway's key. The stderr TEXT is
+# the only thing that separates the two cases.
+cat > "$SANDBOX/ssh-authfail" <<'STUB'
+#!/usr/bin/env bash
+cat >&2 <<'MSG'
+sign_and_send_pubkey: signing failed for ED25519 "SHA256_PoAOWNkQ.pub" from agent: communication with agent failed
+kyle@10.11.12.105: Permission denied (publickey,password,keyboard-interactive).
+MSG
+exit 255
+STUB
+chmod +x "$SANDBOX/ssh-authfail"
+AUTH_ERR="$SANDBOX/auth.err"
+( export WIP_SSH="$SANDBOX/ssh-authfail"; wip_hub_up ) 2>"$AUTH_ERR"
+AUTH_STATUS=$?
+# Pinning only -- 255 is what a rejected key AND a sleeping hub both produce, so
+# this assertion cannot tell them apart. The three below are the ones that can.
+check "ssh-auth: a rejected key still surfaces ssh's own 255" \
+  "$AUTH_STATUS" "255"
+check "ssh-auth: it says the fault is local, not that the hub is away" \
+  "$(grep -c 'not a sleeping hub' "$AUTH_ERR")" "1"
+check "ssh-auth: the diagnostic quotes what ssh actually said" \
+  "$(grep -c 'Permission denied' "$AUTH_ERR")" "1"
+
+# The other side of the classification, and the assertion that stops the fix
+# above from turning an ordinary off-LAN laptop into a five-minute noise
+# generator. These are real OpenSSH connection-failure messages; every one of
+# them must stay silent and must NOT abort.
+QUIET_FAILURES=$'ssh: connect to host gateway port 22: No route to host\nssh: connect to host 10.11.12.105 port 22: Operation timed out\nssh: connect to host gateway port 22: Connection refused\nssh: Could not resolve hostname gateway: nodename nor servname provided\nkex_exchange_identification: Connection closed by remote host'
+cat > "$SANDBOX/ssh-quiet" <<STUB
+#!/usr/bin/env bash
+cat "$SANDBOX/quiet.msg" >&2
+exit 255
+STUB
+chmod +x "$SANDBOX/ssh-quiet"
+QUIET_NOISE=0; QUIET_LOUD=0
+while IFS= read -r msg; do
+  printf '%s\n' "$msg" > "$SANDBOX/quiet.msg"
+  ( export WIP_SSH="$SANDBOX/ssh-quiet"; wip_hub_up ) 2>"$SANDBOX/quiet.err"
+  [ $? -eq 255 ] || QUIET_LOUD=$((QUIET_LOUD+1))
+  [ -s "$SANDBOX/quiet.err" ] && QUIET_NOISE=$((QUIET_NOISE+1))
+done <<< "$QUIET_FAILURES"
+check "ssh-auth: genuine connection failures stay silent (the normal off-LAN case)" \
+  "$QUIET_NOISE" "0"
+check "ssh-auth: genuine connection failures still return 255 without aborting" \
+  "$QUIET_LOUD" "0"
+
+# End to end through the dispatcher, under the generated binary's `set -euo
+# pipefail`, exactly as the timer invokes it. Asserting on wip_hub_up alone is
+# not enough: the silence came from wip_cmd_push's `wip_hub_up || return 0`.
+AUTH_PUSH_OUT="$(
+  ( set -euo pipefail
+    export WIP_LOCAL_HUB=0
+    export WIP_SSH="$SANDBOX/ssh-authfail"
+    # shellcheck source=/dev/null
+    source "$HERE/../home/wip/wip.sh"
+    # shellcheck source=/dev/null
+    source "$HERE/../home/wip/main.sh" push --all ) 2>&1
+)"
+AUTH_PUSH_STATUS=$?
+check "ssh-auth: \`wip push --all\` exits non-zero instead of a silent 0" \
+  "$AUTH_PUSH_STATUS" "255"
+check "ssh-auth: \`wip push --all\` says why instead of printing nothing" \
+  "$(printf '%s\n' "$AUTH_PUSH_OUT" | grep -c 'not a sleeping hub')" "1"
+
 # 126, not 127: the binary is PRESENT but cannot be executed. That is the
 # canonical signature of broken WSL binfmt interop -- ssh.exe is right there on
 # home.sessionPath and `command -v` finds it, but exec'ing it yields "Exec
@@ -676,6 +880,56 @@ check "ssh-missing: \`wip push --all\` exits non-zero instead of a silent 0" \
   "$PUSH_STATUS" "127"
 check "ssh-missing: \`wip push --all\` says why instead of printing nothing" \
   "$(printf '%s\n' "$PUSH_OUT" | grep -c 'no such command on PATH')" "1"
+teardown
+
+# --- last successful hub contact ---------------------------------------------
+# The belt-and-braces half of the C-1 fix. Classifying ssh's stderr per tick can
+# only ever catch failures somebody has already seen; this catches the ones
+# nobody has. However wip_hub_up failed, the stamp did not move -- so `wip` can
+# say how long it has been rather than leaving the user to infer a problem from
+# an absence of output.
+setup
+# A local-directory hub is never "away", so staleness is meaningless there and
+# wip_hub_up never probes; the ssh path is the only one worth asserting on.
+# (setup() re-exports WIP_LOCAL_HUB=1, so this does not leak to a later block.)
+export WIP_LOCAL_HUB=0
+STAMP="$WIP_STATE/last-hub-contact"
+printf '#!/usr/bin/env bash\nexit 0\n'   > "$SANDBOX/ssh-ok";     chmod +x "$SANDBOX/ssh-ok"
+printf '#!/usr/bin/env bash\nexit 255\n' > "$SANDBOX/ssh-gone";   chmod +x "$SANDBOX/ssh-gone"
+export WIP_SSH="$SANDBOX/ssh-ok"
+
+check "stamp: nothing is recorded before the first successful probe" \
+  "$([ -e "$STAMP" ] && echo yes || echo no)" "no"
+# The first-deploy case, and exactly what artemis would have shown under C-1: a
+# timer that has been running for a week and has never once reached the hub.
+check "stamp: never having reached the hub is reported, not assumed fine" \
+  "$(wip_hub_staleness | grep -c 'NEVER reached the hub')" "1"
+
+wip_hub_up
+check "stamp: a successful probe records the contact" \
+  "$([ -s "$STAMP" ] && echo yes || echo no)" "yes"
+check "stamp: a fresh contact produces no warning at all" "$(wip_hub_staleness)" ""
+
+printf '%s\n' "$(( $(date +%s) - 3 * 86400 ))" > "$STAMP"
+check "stamp: an old contact is reported, with its age and the host" \
+  "$(wip_hub_staleness | grep -c 'last reached the hub (unused) 3 days ago')" "1"
+
+# Load-bearing: a FAILING probe must not refresh the stamp, or the warning can
+# never fire -- which is the whole point of having it.
+( export WIP_SSH="$SANDBOX/ssh-gone"; wip_hub_up ) 2>/dev/null
+check "stamp: an unreachable hub does not refresh the stamp" \
+  "$(wip_hub_staleness | grep -c '3 days ago')" "1"
+
+# And it has to reach the human through the verb they actually type.
+check "stamp: bare \`wip\` leads with the stale-hub warning" \
+  "$( ( cd "$SANDBOX" && wip_cmd_status ) 2>/dev/null | head -1 | grep -c '3 days ago')" "1"
+
+# A corrupt stamp must read as "never contacted", not as epoch 0 -- a 56-year
+# age, i.e. a warning that can never clear and reports something absurd.
+printf 'not-a-timestamp\n' > "$STAMP"
+check "stamp: a corrupt stamp reads as never-contacted" \
+  "$(wip_hub_staleness | grep -c 'NEVER reached the hub')" "1"
+unset WIP_SSH
 teardown
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

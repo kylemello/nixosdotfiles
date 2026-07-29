@@ -60,6 +60,72 @@ wip_url()  { printf 'ssh://%s%s/%s.git' "$WIP_REMOTE_HOST" "$WIP_REMOTE_PATH" "$
 # gateway — and nothing would ever surface the mistake.
 wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
 
+# --- last successful hub contact ---------------------------------------------
+#
+# No per-tick classification of ssh's exit status can ever be complete:
+# wip_hub_up below distinguishes the failures it KNOWS about, and a novel one
+# still lands in the quiet bucket by design (see its 255 block). This stamp is
+# the backstop that turns "quiet" into something observable -- `wip` can say
+# "last reached the hub 3 days ago" instead of the user having to infer a
+# problem from an absence of output. Three separate silent-timer bugs in this
+# tool's history (exit 127, exit 126, exit 255-from-auth) would all have been
+# visible in one glance at this.
+#
+# It records REACHABILITY, not a successful push: wip_hub_up is the only writer.
+wip_hub_stamp() { printf '%s/last-hub-contact' "$WIP_STATE"; }
+
+# Seconds since the last successful hub contact. Empty when there has never
+# been one -- the first-deploy case, and the loudest thing this can report.
+wip_hub_last_age() {
+  local f ts
+  f="$(wip_hub_stamp)"
+  [ -f "$f" ] || return 0
+  ts="$(cat "$f" 2>/dev/null)" || return 0
+  # A truncated or hand-edited stamp must read as "no stamp", never as epoch 0
+  # -- that would be a 56-year-old contact and a warning that never clears.
+  case "$ts" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s' "$(( $(date +%s) - ts ))"
+}
+
+# One-line staleness warning for the `wip` status verb, or nothing at all.
+wip_hub_staleness() {
+  # Meaningless against a local-directory hub (tests only): there is no network
+  # to be away from and wip_hub_up never probes, so it would never be stamped.
+  wip_local_hub && return 0
+  local age
+  age="$(wip_hub_last_age)"
+  if [ -z "$age" ]; then
+    printf 'wip: has NEVER reached the hub (%s) — nothing is being pushed or fetched.\n' \
+      "$WIP_REMOTE_HOST"
+    return 0
+  fi
+  # 24h, not the "few hours" the review suggested: a whole day off the LAN is an
+  # ordinary week at the office for ariane, and a warning that fires on every
+  # ordinary day is one nobody reads.
+  [ "$age" -ge 86400 ] || return 0
+  printf 'wip: last reached the hub (%s) %s ago — snapshots are not syncing.\n' \
+    "$WIP_REMOTE_HOST" "$(wip_human_age "$age")"
+}
+
+# Does this probe stderr describe a fault at OUR end rather than an absent hub?
+#
+# Split out from wip_hub_up so the classification is one readable list and can
+# be driven directly from the test suite. Deliberately a POSITIVE match on
+# local faults -- see wip_hub_up's 255 block for why the default is silence.
+wip_ssh_local_fault() {
+  case "$1" in
+    *"Permission denied"*)                    return 0 ;;
+    *"signing failed"*)                       return 0 ;;
+    *"communication with agent failed"*)      return 0 ;;
+    *"agent refused operation"*)              return 0 ;;
+    *"Too many authentication failures"*)     return 0 ;;
+    *"No such identity"*)                     return 0 ;;
+    *"Host key verification failed"*)         return 0 ;;
+    *"HOST IDENTIFICATION HAS CHANGED"*)      return 0 ;;
+  esac
+  return 1
+}
+
 # Is the hub reachable right now? gateway is LAN-only — no tailnet node
 # advertises 10.11.12.0/24 (verified 2026-07-28), so ariane can only reach it on
 # the home network or over UniFi Teleport. An unreachable hub is therefore the
@@ -68,16 +134,68 @@ wip_local_hub() { [ "${WIP_LOCAL_HUB:-0}" = "1" ]; }
 # overlapping runs would pile up.
 wip_hub_up() {
   wip_local_hub && return 0
-  local ssh="${WIP_SSH:-ssh}" status=0
-  # `|| status=$?` rather than a bare call plus `$?`: this must read the same
-  # under `set -e` no matter how the caller invoked us.
-  "$ssh" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
-      "$WIP_REMOTE_HOST" true 2>/dev/null || status=$?
+  local ssh="${WIP_SSH:-ssh}" status=0 err
+  # stderr is CAPTURED rather than discarded (stdout goes to /dev/null; the
+  # remote command is `true` and has none) because the exit status alone cannot
+  # tell the two kinds of 255 apart -- see below. `|| status=$?` rather than a
+  # bare call plus `$?`: this must read the same under `set -e` no matter how
+  # the caller invoked us.
+  err="$("$ssh" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+      "$WIP_REMOTE_HOST" true 2>&1 >/dev/null)" || status=$?
+
+  if [ "$status" -eq 0 ]; then
+    # Stamp every success, so `wip` can report the age of the last contact.
+    # Best-effort: a state dir we cannot write is not a reason to fail a tick
+    # that otherwise worked.
+    mkdir -p "$WIP_STATE" 2>/dev/null && date +%s > "$(wip_hub_stamp)" 2>/dev/null || true
+    return 0
+  fi
+
+  # 255 is OpenSSH's reserved status for its own failures -- and it covers two
+  # completely unrelated events. "Cannot reach the host" is the NORMAL case for
+  # a LAN-only hub and must stay silent. "The host rejected my key" is a fault
+  # at this end and must be loud, or the timer runs every five minutes forever
+  # pushing nothing and logging nothing. Measured on artemis from a systemd user
+  # unit, with a key that gateway does authorize:
+  #
+  #   sign_and_send_pubkey: signing failed for ED25519 "..." from agent:
+  #     communication with agent failed
+  #   kyle@10.11.12.105: Permission denied (publickey,password,keyboard-interactive).
+  #   exit = 255
+  #
+  # (The Windows 1Password agent would not SIGN from a non-interactive session.)
+  # To an exit status alone that is indistinguishable from a sleeping hub, and
+  # main.sh's `wip_hub_up || return 0` turns it straight into a silent exit 0 --
+  # the third distinct route to the same silent-timer bug, after 127 and 126.
+  #
+  # The stderr text is what separates them. Unlike the allow-list below, this is
+  # a positive match on LOCAL faults and anything else at 255 stays quiet, on
+  # purpose: ssh's connection-failure wording is open-ended ("No route to host",
+  # "Operation timed out", "kex_exchange_identification", bare "Connection
+  # closed by ..."), and a five-minute timer that cries wolf about a laptop
+  # being off the LAN is a timer nobody reads. wip_hub_staleness above is the
+  # backstop for whatever this list misses: an unrecognised 255 leaves the stamp
+  # untouched, so `wip` reports the age and the user sees it without grepping a
+  # journal.
+  if [ "$status" -eq 255 ]; then
+    if wip_ssh_local_fault "$err"; then
+      # "a local reason", not "authentication": the list also covers a CHANGED
+      # host key, which is a different (and more alarming) thing entirely.
+      printf 'wip: ssh to %s FAILED for a LOCAL reason (key, agent or host key) — not a sleeping hub.\n' \
+        "$WIP_REMOTE_HOST" >&2
+      printf 'wip: ssh said: %s\n' "$(printf '%s' "$err" | tr '\n' ' ')" >&2
+      printf 'wip: nothing can be pushed or fetched until this is fixed — aborting.\n' >&2
+      # `exit`, not `return`, for the same reason as the misconfiguration path
+      # below: every caller swallows a non-zero wip_hub_up as "hub away".
+      exit "$status"
+    fi
+    return 255
+  fi
 
   # A sleeping hub and a broken local ssh MUST NOT look alike.
   #
-  # The probe above sends its stderr to /dev/null, because a LAN-only hub being
-  # away is the normal case and must stay quiet. That redirection also swallows
+  # The probe used to send its stderr to /dev/null, because a LAN-only hub being
+  # away is the normal case and must stay quiet. That redirection also swallowed
   # the SHELL's own "command not found", so a misconfigured WIP_SSH used to
   # arrive here as a plain non-zero and be reported as "hub away" -- measured:
   # `wip push --all` exited 0 with no output at all, so the timer would push
@@ -85,20 +203,17 @@ wip_hub_up() {
   # testing too: `ssh.exe` resolves in an interactive fish (home.sessionPath)
   # but not in a systemd user unit, which is where the timer runs.
   #
-  # The test is an ALLOW-LIST, deliberately, not a list of bad statuses. The
-  # probe runs `true`, so the only two statuses a healthy setup can produce are
-  # 0 (hub answered) and 255 (OpenSSH's reserved code for its own failures:
-  # cannot resolve, cannot connect, connection refused -- i.e. the hub is away).
-  # Everything else came from this end. Enumerating the bad codes gets it the
-  # wrong way round: any code left off the list falls through to
-  # `return "$status"`, and main.sh's `wip_hub_up || return 0` launders that
-  # straight back into a silent exit 0. That is how 126 -- the status for a
-  # binary that EXISTS but cannot be executed, which is exactly what broken WSL
+  # Everything below this point is reached by ELIMINATION, and that is
+  # deliberate: the two branches above are an ALLOW-LIST, not a list of bad
+  # statuses. The probe runs `true`, so the only statuses a healthy setup can
+  # produce are 0 (hub answered) and 255 (OpenSSH's own failures). Anything else
+  # came from this end and is a misconfiguration. Enumerating the BAD codes
+  # instead would get it the wrong way round: any code left off such a list
+  # would return quietly, and main.sh's `wip_hub_up || return 0` launders a
+  # quiet non-zero straight into a silent exit 0. That is how 126 -- the status
+  # for a binary that EXISTS but cannot be executed, exactly what broken WSL
   # binfmt interop does to ssh.exe ("Exec format error") -- would have walked
   # back in through a different door after 127 was closed.
-  case "$status" in
-    0|255) return "$status" ;;
-  esac
 
   # 127 is the shell's command-not-found status, but ssh also exits 127 when the
   # REMOTE command does, so confirm with `command -v` before blaming the config.
@@ -242,7 +357,7 @@ wip_manifest_path() { printf '%s/_manifest/%s.tsv' "$WIP_REMOTE_PATH" "$1"; }
 # leave the hub's copy of this host's census stale without any signal, and
 # `wip clone` trusts that census as ground truth for what exists here.
 wip_manifest_write() {
-  local repo slug url rel dirty head out remote_dest remote_tmp
+  local repo slug url rel dirty head out remote_dest remote_tmp porcelain rc=0
   if ! out="$(mktemp "${TMPDIR:-/tmp}/wip-man.XXXXXX")"; then
     printf 'wip: manifest: mktemp failed, not publishing\n' >&2
     return 1
@@ -253,7 +368,27 @@ wip_manifest_write() {
     slug="$(wip_slug "$repo")"
     url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
     rel="${repo#"$HOME"/}"
-    if [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then dirty=0; else dirty=1; fi
+    # `--no-optional-locks` is load-bearing, not tidiness. This tool's ONE hard
+    # promise is that it never touches the user's repo, and a plain `git status`
+    # REWRITES .git/index whenever the stat cache is stale -- taking
+    # .git/index.lock to do it. This line runs against every repo on every
+    # five-minute tick, so without the flag the timer both breaks that promise
+    # and races whatever git command the user is running at that moment
+    # ("Unable to create '.git/index.lock': File exists"). Measured: the index
+    # cksum changes across an unflagged call and is byte-identical with it.
+    #
+    # The EXIT STATUS is checked, not just the output: an empty stdout from a
+    # FAILED status is indistinguishable from a clean tree, so a repo with a
+    # corrupt index used to be published as dirty=0 -- "there is nothing waiting
+    # here" -- which is the exact opposite of the truth. Omit the repo instead
+    # and say so; the other host's `wip clone` only ever ADDS repos it lacks, so
+    # a short census is conservative where a wrong one is not.
+    if ! porcelain="$(git --no-optional-locks -C "$repo" status --porcelain)"; then
+      printf 'wip: %s: git status failed; omitting it from the census\n' "$repo" >&2
+      rc=1
+      continue
+    fi
+    if [ -z "$porcelain" ]; then dirty=0; else dirty=1; fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$url" "$rel" "$dirty" "$head" >> "$out"
   done < <(wip_repos)
 
@@ -292,6 +427,10 @@ wip_manifest_write() {
       return 1
     fi
   fi
+  # Non-zero if any repo was omitted above. The census that DID get published is
+  # still the best available one, so it is published either way -- but a caller
+  # must not read "published" as "complete".
+  return "$rc"
 }
 
 # Read another host's manifest. A missing file just means that host hasn't

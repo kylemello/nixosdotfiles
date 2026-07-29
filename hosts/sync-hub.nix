@@ -54,9 +54,17 @@ in
     enable = true;
     host = "0.0.0.0";
     port = 8888;
-    # Registration is opened for the initial `atuin register` on each machine,
-    # then should be flipped to false and rebuilt. Two clients, one user.
-    openRegistration = true;
+    # CLOSED. This listens on 0.0.0.0:8888 with openFirewall below, so an open
+    # registration endpoint is reachable from the whole LAN (and from seth, who
+    # has a shell on this box). It was opened only for the one-time `atuin
+    # register` on each client. Two clients, one user — nobody else should ever
+    # be able to create an account here.
+    #
+    # If a third client ever needs to register: flip this to true, rebuild, run
+    # `atuin register` on that machine, then flip it straight back and rebuild
+    # again. Do not leave it open between those two steps for longer than the
+    # registration takes.
+    openRegistration = false;
     openFirewall = true;
   };
 
