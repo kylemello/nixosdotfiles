@@ -10,7 +10,7 @@
       "source": { "source": "directory", "path": "/home/kyle/personal/claude-plugins" }
     },
     "kmello-dev": {
-      "source": { "source": "directory", "path": "/home/kyle/work/dev-plugins" }
+      "source": { "source": "directory", "path": "/home/kyle/work/claude-plugins" }
     }
   }
 }

@@ -25,7 +25,7 @@ let
   # Declaring a server does NOT authenticate it: `personal` still needs
   # `claude mcp login personal`, and `atlassian-aegis` still needs one interactive
   # `/mcp` -> authenticate -> pick the `aegistherapies` site, once per host. (That
-  # replaces the manual `claude mcp add` step documented in dev-plugins/README.md,
+  # replaces the manual `claude mcp add` step documented in ~/work/claude-plugins/README.md,
   # which aegis-jira's creating-adt-tickets skill hard-depends on by name.)
   baseServers = {
     personal = {

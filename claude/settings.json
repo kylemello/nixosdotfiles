@@ -1,4 +1,7 @@
 {
+  "attribution": {
+    "commit": ""
+  },
   "includeCoAuthoredBy": false,
   "permissions": {
     "allow": [
@@ -138,17 +141,22 @@
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
   "tui": "fullscreen",
+  "voice": {
+    "enabled": false,
+    "mode": "hold"
+  },
   "skipWorkflowUsageWarning": true,
   "editorMode": "vim",
   "remoteControlAtStartup": true,
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
-  "attribution": {
-    "commit": ""
-  },
-  "voice": {
-    "enabled": false,
-    "mode": "hold"
-  },
-  "voiceEnabled": false
+  "voiceEnabled": false,
+  "extraKnownMarketplaces": {
+    "kmello": {
+      "source": {
+        "source": "directory",
+        "path": "/Users/kyle/personal/claude-plugins"
+      }
+    }
+  }
 }
