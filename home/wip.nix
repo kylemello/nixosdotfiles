@@ -363,6 +363,21 @@ in
       # two gates below, both of which use only fish builtins (`test`,
       # `path`, `set`), i.e. zero forks.
       #
+      # Re-measured after `wip notice` learnt to classify the snapshot's base
+      # commit (wip_base_state in home/wip/wip.sh). That costs ONE more `git`,
+      # and only on the announce path: wip_notice classifies after its "is
+      # there anything to say?" gate, and wip_snapshot_meta folded the base
+      # read into the `git log` the age already needed. 100 runs of the `wip
+      # notice` PROCESS against a 120-file fixture — process wall time, not the
+      # fish deltas above, so read the columns and not the rows:
+      #
+      #   outside any repo                7.96 ms -> 8.12 ms
+      #   in a repo, nothing waiting     16.41 ms -> 16.64 ms
+      #   snapshot waiting               48.87 ms -> 54.52 ms
+      #
+      # i.e. the `cd` that prints nothing — which is nearly every `cd` — is
+      # unchanged, and the one that prints pays a single `git merge-base`.
+      #
       # Gate 1, `status is-interactive`: Home Manager sources handler
       # functions from config.fish ABOVE its own `status is-interactive`
       # block (fish.nix `sourceHandlersStr`), so without this the hook fires

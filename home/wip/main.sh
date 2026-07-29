@@ -139,13 +139,51 @@ wip_safety_ref() {
 }
 
 # Deliberate by design: never overwrite a working tree without consent.
+#
+# Three gates, in this order, and the order is the design:
+#
+#   1. UNKNOWN BASE -- refuse outright (unless --force). Non-interactive.
+#   2. DIRTY TREE   -- refuse outright (unless --force). Non-interactive.
+#   3. BASE AHEAD   -- warn and take a separate confirmation. Interactive.
+#
+# Every refusal that can be decided without the user comes BEFORE any prompt, so
+# `wip pull` can never ask a question it was going to ignore. Gate 1 precedes
+# gate 2 because its remedy (`git fetch`) is free and non-destructive, while
+# gate 2's is `--force`, and being told to force your way past a dirty tree
+# before being told you are on the wrong base is advice in the wrong order.
 wip_cmd_pull() {
-  local repo slug shadow force="${1:-}" reply porcelain
+  local repo slug shadow force="${1:-}" reply porcelain other base state
   repo="$(wip_cwd_repo)"
   [ -n "$repo" ] || { echo "wip: not in a git repo" >&2; return 1; }
   slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
-  git --git-dir="$shadow" rev-parse --verify --quiet "refs/wip/$(wip_other_host)" >/dev/null 2>&1 \
-    || { echo "wip: no snapshot from $(wip_other_host) for this repo"; return 0; }
+  other="$(wip_other_host)"
+  git --git-dir="$shadow" rev-parse --verify --quiet "refs/wip/$other" >/dev/null 2>&1 \
+    || { echo "wip: no snapshot from $other for this repo"; return 0; }
+
+  # See wip_base_state in wip.sh. `none` (no readable base= in the message)
+  # deliberately falls through both gates below to the behaviour this command
+  # has always had: a snapshot whose message we cannot parse is not evidence of
+  # a divergent base, and refusing on it would strand any snapshot written by an
+  # older `wip`.
+  # `log -1 --format=%s` rather than wip_snapshot_meta: this command wants only
+  # the subject, and unlike wip_notice it is not on the cd-hook path, so there
+  # is nothing to amortise.
+  base="$(wip_snapshot_base \
+    "$(git --git-dir="$shadow" log -1 --format=%s "refs/wip/$other" 2>/dev/null)")"
+  state="$(wip_base_state "$repo" "$base")"
+
+  # GATE 1. The worst version of this: we hold a tree built on a commit we
+  # cannot even see, so there is no way to reason about what applying it means
+  # and `wip diff` above the prompt would be comparing unrelated histories.
+  if [ "$state" = unknown ]; then
+    echo "wip: this snapshot was taken on top of $base, which is not an object in this repo." >&2
+    echo "     Run \`git fetch\` first — $other may not have pushed that commit yet." >&2
+    if [ "$force" != "--force" ]; then
+      echo "     Refusing: applying it would drop $other's files onto a base you cannot see." >&2
+      return 1
+    fi
+    echo "     --force given — continuing onto a base this repo does not have." >&2
+  fi
 
   # `--no-optional-locks`, same as wip_manifest_write and for the same reason: a
   # plain `git status` rewrites .git/index when the stat cache is stale, and
@@ -164,7 +202,33 @@ wip_cmd_pull() {
     return 1
   fi
 
-  wip_shadow_diff "$repo" "refs/wip/$(wip_other_host)" --stat
+  # GATE 3. Not fatal — the other machine's uncommitted work is real and this is
+  # the only copy of it — but never silent, and never folded into the ordinary
+  # "Apply this snapshot?" prompt below. That prompt is consent to overwrite the
+  # tree; this one is consent to do it in the WRONG ORDER, which is a different
+  # question and the one the user is getting wrong.
+  #
+  # Deliberately NOT bypassed by --force. --force in this command means "yes, my
+  # working tree is dirty, overwrite it"; reusing it to also mean "yes, apply
+  # onto the wrong base" would let one flag wave through two unrelated hazards.
+  if [ "$state" = ahead ]; then
+    echo "wip: this snapshot was taken on top of $base, which is not in your history."
+    echo "     $other has commits you do not. The order that works is \`git pull\` first"
+    echo "     for the commits, then \`wip pull\` for the uncommitted work on top."
+    echo "     Applying now puts $other's files on your OLDER base, and every commit you"
+    echo "     are missing turns into uncommitted changes — \`wip diff\` below is measuring"
+    echo "     two trees that are not comparable, so its numbers are not what you think."
+    printf 'Apply it anyway, without pulling first? [y/N] '
+    # `|| reply=""` so an exhausted stdin aborts with a message rather than
+    # taking the generated binary's `set -e` down mid-prompt.
+    read -r reply || reply=""
+    case "$reply" in
+      y|Y) ;;
+      *)   echo "wip: aborted."; return 0 ;;
+    esac
+  fi
+
+  wip_shadow_diff "$repo" "refs/wip/$other" --stat
   printf 'Apply this snapshot over %s? [y/N] ' "$repo"
   read -r reply
   case "$reply" in
@@ -179,7 +243,7 @@ wip_cmd_pull() {
          # from a subdirectory applied only that subtree (measured) while the diff
          # shown above the prompt, and the "applied" below, described the whole
          # tree. `:/` always means the top of the work tree, whatever the CWD.
-         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$(wip_other_host)" -- :/ \
+         git --git-dir="$shadow" --work-tree="$repo" checkout "refs/wip/$other" -- :/ \
            || { echo "wip: checkout failed; your tree is saved at refs/wip-safety/pre-pull (\`wip undo\`)." >&2; return 1; }
          echo "wip: applied. Previous tree saved — \`wip undo\` restores it." ;;
     *)   echo "wip: aborted." ;;

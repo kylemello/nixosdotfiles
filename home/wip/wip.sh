@@ -608,12 +608,17 @@ wip_shadow_diff() {
 # The repo containing $PWD, or empty if we are not in one.
 wip_cwd_repo() { git rev-parse --show-toplevel 2>/dev/null || true; }
 
-# Age of the other host's snapshot for a repo, in seconds. Empty if none.
-wip_snapshot_age() {
-  local shadow="$1" ref="refs/wip/$(wip_other_host)" ts
-  ts="$(git --git-dir="$shadow" log -1 --format=%ct "$ref" 2>/dev/null)" || return 0
-  [ -n "$ts" ] || return 0
-  printf '%s' "$(( $(date +%s) - ts ))"
+# Everything wip_notice needs to know about the other host's snapshot, from ONE
+# `git log`: when it was taken (%ct) and what it says about itself (%s, which is
+# where wip_snapshot records the base commit). Two lines — timestamp, then
+# subject — or nothing at all when there is no such ref.
+#
+# One invocation rather than one per field, because this sits on the fish
+# cd-hook path. Measured on ariane against a 120-file fixture: a second `git log`
+# here costs ~5 ms of a ~55 ms notice, i.e. as much as the base classification it
+# exists to feed. Splitting is done by parameter expansion, which forks nothing.
+wip_snapshot_meta() {
+  git --git-dir="$1" log -1 --format='%ct%n%s' "refs/wip/$2" 2>/dev/null || true
 }
 
 wip_human_age() {
@@ -624,16 +629,155 @@ wip_human_age() {
   else                          printf '%d days' "$(( s / 86400 ))"; fi
 }
 
+# --- what the snapshot was taken ON TOP OF ------------------------------------
+#
+# wip_snapshot records the base commit in the snapshot's own message:
+#
+#   wip@artemis 2026-07-28T20:15:22-04:00 base=a1b2c3d branch=feat/x
+#
+# For a long time that field was WRITTEN AND NEVER READ, and the omission had
+# teeth. A snapshot only exists because the other tree is dirty, but the other
+# machine may ALSO have commits this one does not. `wip pull` then drops its
+# files over this working tree while HEAD stays put, so every commit we are
+# missing reappears as a huge pile of uncommitted changes on the wrong base --
+# recoverable with `wip undo`, but exactly backwards. The reported diffstat is
+# misleading in the same way: it compares two trees that are not comparable, so
+# "+2000 −40" can be mostly commits `git pull` would have given for free.
+#
+# The answer is almost always BOTH, IN ORDER: `git pull` for the commits, then
+# `wip pull` for the uncommitted work on top. These two functions are what lets
+# the tool say so.
+
+# The base commit recorded in a snapshot's subject line, or empty. A PURE
+# parser over the subject wip_snapshot_meta already read -- it runs no git of
+# its own, so adding the classification costs the cd-hook exactly one extra
+# process (wip_base_state's `merge-base`) rather than two.
+#
+# Parameter expansion rather than sed/awk, for the same reason. `#* base=` is
+# the SHORTEST match, so the leading `wip@<host> <date>` cannot hide a later
+# literal " base=" -- and neither the ISO date nor a git branch name can contain
+# a space, so the first one is always ours.
+#
+# The value is validated as plausible hex before any caller hands it to git. A
+# hand-written or truncated message must read as "no base recorded" (which
+# callers treat as "cannot classify, behave as before") rather than reaching
+# `git merge-base` as an arbitrary string and coming back 128 -- i.e. being
+# reported to the user as "the other machine has a commit you are missing" when
+# in fact the message was simply malformed.
+wip_snapshot_base() {
+  local subject="$1" rest base
+  case "$subject" in *" base="*) ;; *) return 0 ;; esac
+  rest="${subject#* base=}"
+  base="${rest%% *}"
+  case "$base" in ''|*[!0-9a-fA-F]*) return 0 ;; esac
+  # git's own minimum abbreviation. Shorter than this is not a commit-ish, it is
+  # a corrupt message.
+  [ "${#base}" -ge 4 ] || return 0
+  printf '%s' "$base"
+}
+
+# Classify a snapshot's base against the LOCAL HEAD. Prints exactly one word:
+#
+#   ok       base is an ancestor of HEAD. We already have the commit the other
+#            machine was sitting on, so `wip pull` is the whole answer.
+#   ahead    base is an object we can see, but it is NOT in our history: the
+#            other machine has commits we do not (typically we have fetched but
+#            not merged). `git pull` first, then `wip pull`.
+#   unknown  base names no object here at all -- we have not even fetched it,
+#            or the other machine never pushed the commit. `git fetch` first.
+#   none     no usable base= in the message, or git answered something no
+#            documented exit status covers. Classification unavailable.
+#
+# The three exit statuses are `git merge-base --is-ancestor`'s own, measured
+# directly rather than inferred: 0 = ancestor, 1 = not an ancestor, 128 = the
+# argument is not a valid object name. Anything else maps to `none`, i.e. to
+# the behaviour this tool had before the classifier existed -- an unexpected
+# status must not turn `wip pull` into something that refuses everything.
+#
+# READ-ONLY against the user's repo, and that is a hard requirement, not a
+# nicety: this runs on every `cd` through the fish hook. `merge-base` never
+# refreshes or rewrites the index (unlike `git status`, which is why every
+# `status` in this tool carries --no-optional-locks) and touches nothing under
+# .git. tests/wip.test.sh pins that with a full content manifest of .git taken
+# across a classifying wip_notice, and the mutation check for it is a plain
+# `git status` in this function against a staled index -- which fails it.
+#
+# Two known imprecisions, both deliberately left, and both landing on the safe
+# side (they can only make this refuse, never make it wave something through):
+#
+# 1. wip_snapshot writes `rev-parse --short`, and git's abbreviation length
+#    scales with the OBJECT COUNT of the repo it ran in -- so a 7-character
+#    prefix from artemis can be ambiguous in ariane's copy of the same project.
+#    Verified against the live hub on 2026-07-28: most bases are 7 characters
+#    but Tautulli's is 8. An ambiguous prefix exits 128, i.e. reports `unknown`
+#    and asks for a `git fetch` that will not help. Writing the full 40-char sha
+#    would remove this, at the cost of invalidating the format every snapshot
+#    now on the hub carries; not worth it for a failure that is conservative.
+# 2. If HEAD itself cannot be resolved (an unborn branch) merge-base also exits
+#    128, so the user is told to `git fetch` when the real story is "this repo
+#    has no commits".
+wip_base_state() {
+  local repo="$1" base="$2" rc=0
+  [ -n "$base" ] || { printf 'none'; return 0; }
+  git -C "$repo" merge-base --is-ancestor "$base" HEAD 2>/dev/null || rc=$?
+  case "$rc" in
+    0)   printf 'ok'      ;;
+    1)   printf 'ahead'   ;;
+    128) printf 'unknown' ;;
+    *)   printf 'none'    ;;
+  esac
+}
+
 # One-line summary for the current repo, or empty. Used by both `wip` and the
 # fish cd-hook, so they can never disagree.
+#
+# Three distinct notices, because "there is a snapshot waiting" and "you can
+# apply it" are different claims and only one of them used to be made. The
+# diffstat is printed ONLY in the `ok` case: in the other two the two trees are
+# not comparable, and a number that is mostly other people's commits is worse
+# than no number at all.
+#
+# The classification happens AFTER the "is there anything to announce" gate, on
+# purpose. This function runs on every `cd`, and the overwhelmingly common
+# in-repo outcome is "nothing waiting", which returns above -- so the one extra
+# git invocation is paid only on the `cd`s that actually print something.
+# Measured on ariane, 100 runs of the `wip notice` process against a 120-file
+# fixture: 16.41 -> 16.64 ms with nothing waiting, 48.87 -> 54.52 ms with a
+# snapshot to announce.
 wip_notice() {
-  local repo="$1" slug shadow age stat
+  local repo="$1" slug shadow meta ts subject age stat other base state
   slug="$(wip_slug "$repo")"; shadow="$(wip_shadow "$slug")"
   [ -d "$shadow" ] || return 0
-  age="$(wip_snapshot_age "$shadow")"
-  [ -n "$age" ] || return 0
-  stat="$(wip_shadow_diff "$repo" "refs/wip/$(wip_other_host)" --shortstat 2>/dev/null)"
+  # Hoisted: this used to be re-evaluated for the ref and again for the printf.
+  other="$(wip_other_host)"
+  meta="$(wip_snapshot_meta "$shadow" "$other")"
+  [ -n "$meta" ] || return 0
+  ts="${meta%%$'\n'*}"
+  # A snapshot with an EMPTY subject yields a single line, and peeling past the
+  # end of a string leaves it unchanged -- so `subject` would be the timestamp.
+  # Harmless: it contains no " base=", so it parses as "no base recorded".
+  subject="${meta#*$'\n'}"
+  # Never do arithmetic on something that is not a number: a corrupt %ct would
+  # otherwise be a shell error under `set -e`, or an absurd age. Same discipline
+  # as wip_hub_last_age's guard on the hub-contact stamp.
+  case "$ts" in ''|*[!0-9]*) return 0 ;; esac
+  age=$(( $(date +%s) - ts ))
+  stat="$(wip_shadow_diff "$repo" "refs/wip/$other" --shortstat 2>/dev/null)"
   [ -n "$stat" ] || return 0
-  printf '⬇  snapshot from %s · %s ago ·%s · run `wip pull`\n' \
-    "$(wip_other_host)" "$(wip_human_age "$age")" "$stat"
+
+  base="$(wip_snapshot_base "$subject")"
+  state="$(wip_base_state "$repo" "$base")"
+  case "$state" in
+    ahead)
+      printf '⬇  snapshot from %s · %s ago · based on %s, which is not in your history — run `git pull` first, then `wip pull`\n' \
+        "$other" "$(wip_human_age "$age")" "$base" ;;
+    unknown)
+      printf '⬇  snapshot from %s · %s ago · base %s is unknown here — run `git fetch` first (%s may not have pushed it)\n' \
+        "$other" "$(wip_human_age "$age")" "$base" "$other" ;;
+    # `ok`, and `none` (an unreadable base= is not a reason to withhold the
+    # notice this tool has always printed).
+    *)
+      printf '⬇  snapshot from %s · %s ago ·%s · run `wip pull`\n' \
+        "$other" "$(wip_human_age "$age")" "$stat" ;;
+  esac
 }

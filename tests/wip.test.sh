@@ -127,6 +127,23 @@ stale_index() {
     -exec touch -t "$(printf '2020010100%02d' "$STALE_N")" {} +
 }
 
+# A CONTENT manifest of a repo's .git: every regular file's path plus a checksum
+# of its bytes, sorted. Two of these being equal is the strongest statement this
+# suite can make about "wip did not touch the user's repo" -- it catches a
+# rewritten index, a new ref, a stray lock file and an object that appeared,
+# where the existing per-probe assertions (index cksum, for-each-ref, ...) each
+# catch only one of those.
+#
+# Content, not mtimes: stale_index deliberately backdates the WORKING TREE, and
+# git's own reads legitimately leave directory mtimes alone or not depending on
+# the filesystem. LC_ALL=C so the ordering does not depend on the host's locale.
+git_manifest() {
+  ( cd "$1/.git" 2>/dev/null || return 0
+    find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+      printf '%s %s\n' "$f" "$(cksum < "$f")"
+    done )
+}
+
 setup() {
   SANDBOX="$(mktemp -d)"
   export HOME="$SANDBOX/home"
@@ -779,6 +796,267 @@ check "pull: from a subdirectory, still applies that subdirectory" \
 ( cd "$REPO/sub" && wip_cmd_undo <<<y ) >/dev/null 2>&1
 check "undo: from a subdirectory, restores the whole tree" \
   "$(cat "$REPO/top.txt")" "mine-top"
+teardown
+
+# --- the snapshot's base commit ----------------------------------------------
+# wip_snapshot has always written `base=<sha>` into the snapshot's own message,
+# and for a long time NOTHING read it back: `grep -n 'base=' home/wip/*.sh`
+# returned exactly one hit, the line that writes it. So `wip notice` compared
+# two TREES and unconditionally said "run `wip pull`", never asking whether this
+# machine even has the commit the snapshot sits on.
+#
+# When the other machine is dirty AND ahead, that advice is backwards. `wip pull`
+# drops its files over this working tree while HEAD stays put, so every commit
+# we are missing reappears as a mountain of uncommitted changes on the wrong
+# base -- and the diffstat quoted in the notice is measuring two trees that are
+# not comparable, so it is mostly counting commits `git pull` would have given
+# for free. The answer is nearly always BOTH, IN ORDER.
+#
+# Three states, taken straight from `git merge-base --is-ancestor <base> HEAD`:
+# 0 (we have it), 1 (it exists here but is not in our history), 128 (we cannot
+# see it at all). Each gets its own notice naming its own next command, and the
+# two that are not "0" gate `wip pull`. (main.sh was sourced above.)
+
+# --- state 0: the base is an ancestor of HEAD --------------------------------
+setup
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"                      # base= is this repo's own HEAD
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+git -C "$REPO" checkout -q -- tracked.txt   # clean tree: only the base gate can refuse
+
+# The subject line of whatever the shadow currently holds from otherhost. The
+# parser is pure, so the tests feed it strings; this is how they get a REAL one.
+snap_subject() { git --git-dir="$SHADOW" log -1 --format=%s refs/wip/otherhost; }
+
+# The parser on its own, against literal subjects -- the malformed shapes are
+# awkward to build as real commits and are exactly where this has to be right.
+check "base: the parser reads base= out of a real subject line" \
+  "$(wip_snapshot_base 'wip@artemis 2026-07-28T20:15:22-04:00 base=a1b2c3d branch=feat/x')" \
+  "a1b2c3d"
+check "base: base= as the last token still parses" \
+  "$(wip_snapshot_base 'wip@artemis 2026-07-28T20:15:22-04:00 base=a1b2c3d')" "a1b2c3d"
+check "base: a subject with no base= yields nothing" \
+  "$(wip_snapshot_base 'wip@artemis 2026-07-28T20:15:22-04:00 branch=main')" ""
+check "base: a non-hex base= is rejected rather than handed to git as an object" \
+  "$(wip_snapshot_base 'wip@artemis 2026-07-28T20:15:22-04:00 base=not-a-sha branch=m')" ""
+check "base: a base= too short to be a commit-ish is rejected" \
+  "$(wip_snapshot_base 'wip@artemis 2026-07-28T20:15:22-04:00 base=ab branch=m')" ""
+
+check "base: the recorded base is read back out of a real snapshot message" \
+  "$(wip_snapshot_base "$(snap_subject)")" \
+  "$(git -C "$REPO" rev-parse --short HEAD)"
+check "base: a base we already have classifies as ok" \
+  "$(wip_base_state "$REPO" "$(wip_snapshot_base "$(snap_subject)")")" "ok"
+
+NOTICE_OK="$(wip_notice "$REPO")"
+check "base ok: the notice still just says to run \`wip pull\`" \
+  "$(printf '%s\n' "$NOTICE_OK" | grep -c 'run `wip pull`$')" "1"
+check "base ok: ...and still carries the diffstat, which here is meaningful" \
+  "$(printf '%s\n' "$NOTICE_OK" | grep -c 'file changed')" "1"
+check "base ok: ...and sends nobody to git" \
+  "$(printf '%s\n' "$NOTICE_OK" | grep -cE 'git (pull|fetch)')" "0"
+
+# The age and the base now come out of the SAME `git log` (wip_snapshot_meta,
+# one process instead of two on the cd-hook path), so pin that the two fields
+# did not get swapped or mis-split in the process. Backdated three hours, which
+# no other assertion here would notice.
+AGED_TS="$(( $(date +%s) - 3 * 3600 ))"
+AGED_SNAP="$(GIT_COMMITTER_DATE="$AGED_TS +0000" GIT_AUTHOR_DATE="$AGED_TS +0000" \
+  git -C "$BARE" -c user.email=t@t -c user.name=t commit-tree \
+  "$(git -C "$BARE" rev-parse 'refs/heads/wip/otherhost^{tree}')" \
+  -m "wip@otherhost 2026-07-28T20:15:22-04:00 base=$(git -C "$REPO" rev-parse --short HEAD) branch=main")"
+git -C "$BARE" update-ref refs/heads/wip/otherhost "$AGED_SNAP"
+wip_fetch "$REPO"
+check "base ok: the age still comes from the snapshot's own timestamp" \
+  "$(wip_notice "$REPO" | grep -c '· 3 hr ago ·')" "1"
+check "base ok: ...and the base read from that same commit still classifies ok" \
+  "$(wip_base_state "$REPO" "$(wip_snapshot_base "$(snap_subject)")")" "ok"
+
+# The control for the two-prompt discriminator further down: with an ok base a
+# SINGLE `y` is enough, so a scenario where one `y` is NOT enough proves an
+# extra confirmation exists rather than merely that the pull refused.
+( cd "$REPO" && wip_cmd_pull <<<y ) >/dev/null 2>&1
+check "base ok: \`wip pull\` is unchanged — one \`y\` applies the snapshot" \
+  "$(cat "$REPO/tracked.txt")" "from-other"
+teardown
+
+# --- state 1: the base exists here but is not in our history -----------------
+# The real shape of this: the other machine committed and pushed, we ran
+# `git fetch` (so the object is here) but never merged. HEAD is behind.
+setup
+printf 'v2\n' > "$REPO/tracked.txt"
+git -C "$REPO" add -A; git -C "$REPO" commit -qm second
+AHEAD_BASE="$(git -C "$REPO" rev-parse --short HEAD)"
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"                      # base= the second commit
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+# Rewind: the second commit is still an OBJECT in this repo, it is simply no
+# longer reachable from HEAD. That is exactly `fetched but not merged`.
+git -C "$REPO" reset -q --hard HEAD~1
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+
+check "base ahead: a base off our history classifies as ahead, not unknown" \
+  "$(wip_base_state "$REPO" "$AHEAD_BASE")" "ahead"
+
+NOTICE_AHEAD="$(wip_notice "$REPO")"
+check "base ahead: the notice names \`git pull\` first, then \`wip pull\`" \
+  "$(printf '%s\n' "$NOTICE_AHEAD" | grep -c 'run `git pull` first, then `wip pull`')" "1"
+check "base ahead: it names the base commit it is objecting to" \
+  "$(printf '%s\n' "$NOTICE_AHEAD" | grep -c "$AHEAD_BASE")" "1"
+# The number that used to be quoted here is mostly the commits `git pull` would
+# hand over for free, so quoting it is worse than saying nothing.
+check "base ahead: the incomparable diffstat is withheld" \
+  "$(printf '%s\n' "$NOTICE_AHEAD" | grep -c 'file changed')" "0"
+check "base ahead: and it does not end by telling you to just \`wip pull\`" \
+  "$(printf '%s\n' "$NOTICE_AHEAD" | grep -c 'run `wip pull`$')" "0"
+
+# `wip notice` runs on every `cd` through the fish hook, against the user's real
+# repos, so the classifier reaching into the REAL repo (this is the one new call
+# that does) must be read-only. `git merge-base` never refreshes the index the
+# way `git status` does -- a full content manifest of .git is what pins it.
+stale_index "$REPO"
+GITMAN_BEFORE="$(git_manifest "$REPO")"
+wip_notice "$REPO" >/dev/null 2>&1
+check "base classify: a classifying notice leaves .git byte-identical" \
+  "$(git_manifest "$REPO")" "$GITMAN_BEFORE"
+# Anti-vacuity: the manifest above is only worth something if it can tell that
+# .git changed at all.
+git -C "$REPO" update-ref refs/wip-test-canary HEAD
+check "base classify: ...and the manifest really can see a change to .git" \
+  "$([ "$(git_manifest "$REPO")" = "$GITMAN_BEFORE" ] && echo same || echo differs)" "differs"
+git -C "$REPO" update-ref -d refs/wip-test-canary
+
+# --- `wip pull` must not silently apply onto the wrong base ------------------
+# The tree is CLEAN here, so the dirty-tree gate cannot be what stops the pull
+# -- whatever refuses is the base gate.
+AHEAD_OUT="$( ( cd "$REPO" && wip_cmd_pull <<<n ) 2>&1 )"
+check "pull ahead: it warns, in order, naming \`git pull\` before \`wip pull\`" \
+  "$(printf '%s\n' "$AHEAD_OUT" | grep -c 'order that works is `git pull` first')" "1"
+check "pull ahead: declining leaves the working tree alone" \
+  "$(cat "$REPO/tracked.txt")" "v1"
+# THE discriminator. One `y` applies the snapshot when the base is ok (asserted
+# above); here it must not, because a SECOND, separate confirmation stands in
+# front of the ordinary "Apply this snapshot?" prompt. Feeding `y` then `n`
+# rather than relying on EOF keeps this independent of `read`'s behaviour at
+# end of input.
+( cd "$REPO" && wip_cmd_pull <<<$'y\nn' ) >/dev/null 2>&1
+check "pull ahead: the wrong-order confirmation is SEPARATE from the apply prompt" \
+  "$(cat "$REPO/tracked.txt")" "v1"
+# --force means "my working tree is dirty, overwrite it". It must not double as
+# consent to apply onto a base that is not in our history.
+FORCE_OUT="$( ( cd "$REPO" && wip_cmd_pull --force <<<n ) 2>&1 )"
+check "pull ahead: --force does not wave the wrong-order warning through" \
+  "$(printf '%s\n' "$FORCE_OUT" | grep -c 'order that works is `git pull` first')" "1"
+check "pull ahead: ...and --force alone still applies nothing" \
+  "$(cat "$REPO/tracked.txt")" "v1"
+# Consented to twice: it goes through, and every existing protection is still
+# in place on the way.
+( cd "$REPO" && wip_cmd_pull <<<$'y\ny' ) >/dev/null 2>&1
+check "pull ahead: consented twice, the snapshot is applied" \
+  "$(cat "$REPO/tracked.txt")" "from-other"
+check "pull ahead: ...and the pre-pull safety ref was still written first" \
+  "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip-safety/pre-pull >/dev/null && echo yes || echo no)" \
+  "yes"
+( cd "$REPO" && wip_cmd_undo <<<y ) >/dev/null 2>&1
+check "pull ahead: ...and \`wip undo\` really brings the old tree back" \
+  "$(cat "$REPO/tracked.txt")" "v1"
+
+# Gate ordering: a refusal the user cannot argue with must come before a
+# question. A dirty tree with no --force refuses outright and never prompts.
+printf 'my-local-work\n' > "$REPO/tracked.txt"
+DIRTY_OUT="$( ( cd "$REPO" && wip_cmd_pull <<<y ) 2>&1 )"
+check "pull ahead: a dirty tree still refuses outright, before any prompt" \
+  "$(printf '%s\n' "$DIRTY_OUT" | grep -c 'Apply it anyway')" "0"
+check "pull ahead: ...and that refusal leaves the local work in place" \
+  "$(cat "$REPO/tracked.txt")" "my-local-work"
+teardown
+
+# --- state 128: the base names no object we have -----------------------------
+# We have not fetched it, or the other machine never pushed the commit. Applying
+# a tree whose base is invisible is the worst version of this: there is nothing
+# to reason against, so `wip pull` refuses outright.
+setup
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+UNKNOWN_BASE="0123456789abcdef0123456789abcdef01234567"
+SNAP_TREE="$(git -C "$BARE" rev-parse 'refs/heads/wip/testhost^{tree}')"
+FAKE_SNAP="$(git -C "$BARE" -c user.email=t@t -c user.name=t commit-tree "$SNAP_TREE" \
+  -m "wip@otherhost 2026-07-28T20:15:22-04:00 base=$UNKNOWN_BASE branch=main")"
+git -C "$BARE" update-ref refs/heads/wip/otherhost "$FAKE_SNAP"
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+git -C "$REPO" checkout -q -- tracked.txt   # clean tree, as above
+
+check "base unknown: an invisible base classifies as unknown, not ahead" \
+  "$(wip_base_state "$REPO" "$UNKNOWN_BASE")" "unknown"
+
+NOTICE_UNKNOWN="$(wip_notice "$REPO")"
+check "base unknown: the notice says the base is unknown here" \
+  "$(printf '%s\n' "$NOTICE_UNKNOWN" | grep -c "base $UNKNOWN_BASE is unknown here")" "1"
+check "base unknown: it sends you to \`git fetch\`, not \`git pull\`" \
+  "$(printf '%s\n' "$NOTICE_UNKNOWN" | grep -c 'run `git fetch` first')" "1"
+check "base unknown: ...and never to \`wip pull\`" \
+  "$(printf '%s\n' "$NOTICE_UNKNOWN" | grep -c 'wip pull')" "0"
+
+UNKNOWN_RC=0
+UNKNOWN_OUT="$( ( cd "$REPO" && wip_cmd_pull <<<y ) 2>&1 )" || UNKNOWN_RC=$?
+check "pull unknown: refuses, non-zero" "$UNKNOWN_RC" "1"
+check "pull unknown: ...saying so, and naming \`git fetch\`" \
+  "$(printf '%s\n' "$UNKNOWN_OUT" | grep -c 'Run `git fetch` first')" "1"
+check "pull unknown: ...and the working tree is untouched" \
+  "$(cat "$REPO/tracked.txt")" "v1"
+# The escape hatch has to exist, or a genuinely stuck user has none.
+( cd "$REPO" && wip_cmd_pull --force <<<y ) >/dev/null 2>&1
+check "pull unknown: --force is the way past it" \
+  "$(cat "$REPO/tracked.txt")" "from-other"
+teardown
+
+# --- a message with no readable base= must not break anything ----------------
+# Compatibility, and the reason `none` is a state of its own. A snapshot written
+# by an older `wip`, or a hand-made ref, has no base to classify -- that is not
+# evidence of divergence, so the notice and the pull behave exactly as they did
+# before the classifier existed. Refusing here would strand the work instead.
+setup
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+SNAP_TREE="$(git -C "$BARE" rev-parse 'refs/heads/wip/testhost^{tree}')"
+NOBASE_SNAP="$(git -C "$BARE" -c user.email=t@t -c user.name=t commit-tree "$SNAP_TREE" \
+  -m "wip@otherhost 2026-07-28T20:15:22-04:00 branch=main")"
+git -C "$BARE" update-ref refs/heads/wip/otherhost "$NOBASE_SNAP"
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+git -C "$REPO" checkout -q -- tracked.txt
+
+check "base none: a message with no base= reads as no base at all" \
+  "$(wip_snapshot_base "$(snap_subject)")" ""
+check "base none: which classifies as none, not as unknown" \
+  "$(wip_base_state "$REPO" "")" "none"
+check "base none: the notice falls back to the plain one" \
+  "$(wip_notice "$REPO" | grep -c 'run `wip pull`$')" "1"
+( cd "$REPO" && wip_cmd_pull <<<y ) >/dev/null 2>&1
+check "base none: and \`wip pull\` still applies on a single \`y\`" \
+  "$(cat "$REPO/tracked.txt")" "from-other"
+
+# A base= that is not plausible hex must read as absent too, rather than being
+# handed to git and coming back 128 -- which would report a corrupt message to
+# the user as "the other machine has a commit you are missing".
+GARBAGE_SNAP="$(git -C "$BARE" -c user.email=t@t -c user.name=t commit-tree "$SNAP_TREE" \
+  -m "wip@otherhost 2026-07-28T20:15:22-04:00 base=not-a-sha branch=main")"
+git -C "$BARE" update-ref refs/heads/wip/otherhost "$GARBAGE_SNAP"
+wip_fetch "$REPO"
+check "base none: a malformed base= is not passed off to git as an object" \
+  "$(wip_snapshot_base "$(snap_subject)")" ""
 teardown
 
 # --- fetch: one census read, then only the repos that have a snapshot --------
