@@ -42,6 +42,10 @@
     terraform
     tokei
     tree-sitter
+    # Browser-mode test runners (Vitest/Playwright) download a prebuilt
+    # Chromium that expects an FHS filesystem and cannot start here. This one
+    # runs natively; the harness picks it up off PATH.
+    ungoogled-chromium
     uv
   ];
 }
