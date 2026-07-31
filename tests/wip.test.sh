@@ -812,12 +812,20 @@ teardown
 # not comparable, so it is mostly counting commits `git pull` would have given
 # for free. The answer is nearly always BOTH, IN ORDER.
 #
-# Three states, taken straight from `git merge-base --is-ancestor <base> HEAD`:
-# 0 (we have it), 1 (it exists here but is not in our history), 128 (we cannot
-# see it at all). Each gets its own notice naming its own next command, and the
-# two that are not "0" gate `wip pull`. (main.sh was sourced above.)
+# FOUR states over the three exit statuses of
+# `git merge-base --is-ancestor <base> HEAD`: 1 (it exists here but is not in our
+# history), 128 (we cannot see it at all), and 0 -- which is TWO situations, not
+# one, and conflating them was its own bug. Exit 0 means "base is an ancestor of
+# HEAD", which is true both when base IS HEAD (the trees are comparable) and when
+# base is a STRICT ancestor, i.e. we have committed past the snapshot. In the
+# second case the diffstat contains every file we have committed since, shown
+# backwards, and `wip pull` reverts those commits into uncommitted changes. See
+# the `behind` block below for the measured case that found it.
+#
+# Each state gets its own notice naming its own next command, and the three that
+# are not "the same commit" gate `wip pull`. (main.sh was sourced above.)
 
-# --- state 0: the base is an ancestor of HEAD --------------------------------
+# --- state 0, same commit: the base IS HEAD ----------------------------------
 setup
 printf 'from-other\n' > "$REPO/tracked.txt"
 wip_snapshot "$REPO"                      # base= is this repo's own HEAD
@@ -882,6 +890,103 @@ check "base ok: ...and the base read from that same commit still classifies ok" 
 ( cd "$REPO" && wip_cmd_pull <<<y ) >/dev/null 2>&1
 check "base ok: \`wip pull\` is unchanged — one \`y\` applies the snapshot" \
   "$(cat "$REPO/tracked.txt")" "from-other"
+teardown
+
+# --- state 0, strict ancestor: WE have committed past the base ----------------
+# The other direction of divergence, and the one `merge-base --is-ancestor` cannot
+# distinguish on its exit status alone: it answers 0 for "base IS HEAD" and 0 for
+# "base is an ancestor of HEAD", and only the first makes the two trees
+# comparable. Left as one state, this is the SAME bug the `ahead` case above
+# exists to prevent, arriving from the opposite side.
+#
+# Measured on artemis, 2026-07-31, which is what found it. artemis committed twice
+# at 12:10 (9efe413c -> b784068e); ariane's snapshot, still based on 9efe413c,
+# carried one new file. artemis announced:
+#
+#   ⬇  snapshot from ariane · 4 min ago · 8 files changed, 483 insertions(+), 37 deletions(-) · run `wip pull`
+#
+# 7 of those 8 files were artemis's OWN 12:10 commits, shown as reversions, and
+# `wip pull` would have rolled them back into uncommitted changes on a single `y`.
+setup
+# The other machine snapshots on commit 1, carrying one file's worth of real work.
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+BEHIND_BASE="$(git -C "$REPO" rev-parse --short HEAD)"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+# ...and THIS machine commits past it. Two paths, so the incomparable diffstat is
+# visibly bigger than the one file the snapshot actually changed -- the same shape
+# as the 8-files-for-1 measured above.
+git -C "$REPO" checkout -q -- tracked.txt
+printf 'v2\n'  > "$REPO/tracked.txt"
+printf 'new\n' > "$REPO/added.txt"
+git -C "$REPO" add -A; git -C "$REPO" commit -qm second
+wip_fetch "$REPO"
+SHADOW="$(wip_shadow "$(wip_slug "$REPO")")"
+
+check "base behind: a base we have committed PAST classifies as behind, not ok" \
+  "$(wip_base_state "$REPO" "$BEHIND_BASE")" "behind"
+# The control that makes the assertion above mean something: the split is between
+# two bases that BOTH answer 0 to `--is-ancestor`, so HEAD itself must still be
+# `ok` or the fix has simply broken the ordinary case.
+check "base behind: ...while HEAD itself is still ok, so the split is real" \
+  "$(wip_base_state "$REPO" "$(git -C "$REPO" rev-parse --short HEAD)")" "ok"
+
+NOTICE_BEHIND="$(wip_notice "$REPO")"
+check "base behind: the notice says the other machine is behind us" \
+  "$(printf '%s\n' "$NOTICE_BEHIND" | grep -c 'otherhost is behind you')" "1"
+check "base behind: it names the base commit it is objecting to" \
+  "$(printf '%s\n' "$NOTICE_BEHIND" | grep -c "$BEHIND_BASE")" "1"
+# The whole point: the number that started this investigation was 8 files for a
+# 1-file change, so it must not be quoted at all.
+check "base behind: the incomparable diffstat is withheld" \
+  "$(printf '%s\n' "$NOTICE_BEHIND" | grep -c 'file changed')" "0"
+check "base behind: and it does not end by telling you to just \`wip pull\`" \
+  "$(printf '%s\n' "$NOTICE_BEHIND" | grep -c 'run `wip pull`$')" "0"
+# The fix adds a SECOND `merge-base` to the cd-hook path, so re-pin the read-only
+# promise here rather than trusting the `ahead` block's copy of it: this is the
+# call that runs on the ordinary, overwhelmingly common `cd` into a repo whose
+# base is an ancestor of HEAD.
+stale_index "$REPO"
+GITMAN_BEFORE="$(git_manifest "$REPO")"
+wip_notice "$REPO" >/dev/null 2>&1
+check "base behind: classifying leaves .git byte-identical" \
+  "$(git_manifest "$REPO")" "$GITMAN_BEFORE"
+
+# --- `wip pull` must not silently revert our own commits ---------------------
+# Clean tree, so the dirty-tree gate cannot be what stops it.
+BEHIND_OUT="$( ( cd "$REPO" && wip_cmd_pull <<<n ) 2>&1 )"
+check "pull behind: it says applying would revert our commits" \
+  "$(printf '%s\n' "$BEHIND_OUT" | grep -c 'REVERTS')" "1"
+check "pull behind: it names the fix as \`git pull\` on the OTHER machine" \
+  "$(printf '%s\n' "$BEHIND_OUT" | grep -c '`git pull` on otherhost')" "1"
+check "pull behind: declining leaves our committed state alone" \
+  "$(cat "$REPO/tracked.txt")" "v2"
+# The discriminator, as in the `ahead` block: one `y` is enough when the base is
+# HEAD, so needing two proves a separate confirmation stands in front of the
+# ordinary apply prompt.
+( cd "$REPO" && wip_cmd_pull <<<$'y\nn' ) >/dev/null 2>&1
+check "pull behind: the revert confirmation is SEPARATE from the apply prompt" \
+  "$(cat "$REPO/tracked.txt")" "v2"
+# --force means "my working tree is dirty, overwrite it". It must not double as
+# consent to throw away commits.
+FORCE_BEHIND="$( ( cd "$REPO" && wip_cmd_pull --force <<<n ) 2>&1 )"
+check "pull behind: --force does not wave the revert warning through" \
+  "$(printf '%s\n' "$FORCE_BEHIND" | grep -c 'REVERTS')" "1"
+check "pull behind: ...and --force alone still applies nothing" \
+  "$(cat "$REPO/tracked.txt")" "v2"
+# Consented to twice it goes through -- the other machine's uncommitted work is
+# real, and this is still the only copy of it.
+( cd "$REPO" && wip_cmd_pull <<<$'y\ny' ) >/dev/null 2>&1
+check "pull behind: consented twice, the snapshot is applied" \
+  "$(cat "$REPO/tracked.txt")" "from-other"
+check "pull behind: ...and the pre-pull safety ref was still written first" \
+  "$(git --git-dir="$SHADOW" rev-parse --verify --quiet refs/wip-safety/pre-pull >/dev/null && echo yes || echo no)" \
+  "yes"
+( cd "$REPO" && wip_cmd_undo <<<y ) >/dev/null 2>&1
+check "pull behind: ...and \`wip undo\` brings our committed state back" \
+  "$(cat "$REPO/tracked.txt")" "v2"
 teardown
 
 # --- state 1: the base exists here but is not in our history -----------------
@@ -1057,6 +1162,75 @@ git -C "$BARE" update-ref refs/heads/wip/otherhost "$GARBAGE_SNAP"
 wip_fetch "$REPO"
 check "base none: a malformed base= is not passed off to git as an object" \
   "$(wip_snapshot_base "$(snap_subject)")" ""
+teardown
+
+# --- which WAY the diffstat runs ---------------------------------------------
+# `git diff <ref>` measures ref -> working tree, so a diff of an INCOMING snapshot
+# described the reverse of what `wip pull` applies. Measured on artemis
+# 2026-07-31: ariane had added a new 79-line secretspec.toml, and the notice read
+#
+#   ⬇  snapshot from ariane · 2 min ago · 1 file changed, 79 deletions(-) · run `wip pull`
+#
+# for a file the pull was about to CREATE. Same inversion, worse consequences, in
+# the `behind` case above: its "483 insertions(+)" were artemis's own committed
+# lines, and the number described them arriving rather than being destroyed.
+#
+# Every one of these numbers is read as "what happens to MY tree if I say yes", so
+# that is the direction they have to run in: wip_shadow_diff passes -R.
+setup
+# The shape of the report: a file the other machine has and this one has never
+# seen. A MODIFIED line cannot pin a direction (one insertion and one deletion
+# either way); an added file can.
+printf 'a\nb\nc\n' > "$REPO/new-from-other.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+rm -f "$REPO/new-from-other.txt"          # ...and this machine does not have it
+wip_fetch "$REPO"
+
+check "diff direction: an incoming new file is an ADDITION, not a deletion" \
+  "$(wip_shadow_diff "$REPO" refs/wip/otherhost --name-status | tr -d '[:space:]')" \
+  "Anew-from-other.txt"
+DIRSTAT="$(wip_shadow_diff "$REPO" refs/wip/otherhost --shortstat)"
+check "diff direction: ...so its lines count as insertions" \
+  "$(printf '%s\n' "$DIRSTAT" | grep -c '3 insertions(+)')" "1"
+check "diff direction: ...and not as deletions" \
+  "$(printf '%s\n' "$DIRSTAT" | grep -c 'deletion')" "0"
+check "diff direction: the notice quotes that same direction" \
+  "$(wip_notice "$REPO" | grep -c '1 file changed, 3 insertions(+)')" "1"
+teardown
+
+# What makes the flip exactly honest rather than merely better-signed, and the
+# reason `-R` needs no caveat: the reversed diff covers PRECISELY the paths
+# `wip pull` writes, no more.
+#
+# `wip pull` runs `checkout <ref> -- :/`, which writes the paths the snapshot HAS
+# and never removes one it lacks. A naive reversal would therefore overstate --
+# reporting a file only this machine has as a deletion the pull will not perform.
+# It does not, because wip_shadow_diff read-trees the snapshot into the shadow's
+# index first, and `git diff <tree>` only compares paths that are in the index. So
+# a path the snapshot lacks is not compared at all. Measured both flavours, since
+# "tracked" and "in the snapshot" are different questions here: an untracked local
+# file and a local file we have COMMITTED are equally invisible.
+setup
+printf 'from-other\n' > "$REPO/tracked.txt"
+wip_snapshot "$REPO"
+BARE="$WIP_REMOTE_PATH/$(wip_slug "$REPO").git"
+git -C "$BARE" update-ref refs/heads/wip/otherhost refs/heads/wip/testhost
+git -C "$BARE" update-ref -d refs/heads/wip/testhost
+git -C "$REPO" checkout -q -- tracked.txt
+printf 'mine-untracked\n' > "$REPO/untracked-here.txt"
+printf 'mine-committed\n' > "$REPO/committed-here.txt"
+git -C "$REPO" add committed-here.txt; git -C "$REPO" commit -qm mine
+wip_fetch "$REPO"
+check "diff direction: a local-only file is not reported as an incoming deletion" \
+  "$(wip_shadow_diff "$REPO" refs/wip/otherhost --name-status | tr -d '[:space:]')" \
+  "Mtracked.txt"
+check "diff direction: ...nor when asked about it by name (untracked)" \
+  "$(wip_shadow_diff "$REPO" refs/wip/otherhost --name-status -- untracked-here.txt)" ""
+check "diff direction: ...nor when it is one of OUR commits" \
+  "$(wip_shadow_diff "$REPO" refs/wip/otherhost --name-status -- committed-here.txt)" ""
 teardown
 
 # --- fetch: one census read, then only the repos that have a snapshot --------

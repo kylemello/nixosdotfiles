@@ -780,7 +780,9 @@ wip_fetch() {
   fi
 }
 
-# Diff a shadow snapshot ref against the real working tree.
+# Diff a shadow snapshot ref against the real working tree, in the direction the
+# ref would be APPLIED: every caller here is answering "what happens to my tree
+# if I say yes", so that is what the numbers have to describe.
 #
 # The shadow is bare and only ever fetched into, so its index is EMPTY, and
 # `git diff <ref>` consults the index to decide what is tracked. With an empty
@@ -788,8 +790,25 @@ wip_fetch() {
 # snapshot and worktree produced "1 file changed, 1 deletion(-)". read-tree the
 # ref into the shadow's index first so the comparison is against reality.
 #
+# `-R` because `git diff <ref>` measures ref -> WORKING TREE, which is the
+# reverse of what an incoming snapshot does, and every caller of this presents the
+# result as the incoming change. Measured on artemis 2026-07-31: ariane had added
+# a new 79-line secretspec.toml and the notice read "1 file changed, 79
+# deletions(-)" for a file `wip pull` was about to CREATE. In the `behind` case
+# the same inversion was worse than confusing -- "483 insertions(+)" was artemis's
+# own committed content, and the sign said it was arriving rather than being
+# destroyed.
+#
+# The reversal needs no caveat about overstating, and the read-tree above is why.
+# `wip pull` writes the paths the snapshot HAS and never removes one it lacks, so a
+# naive reversal would report a file only this machine has as a deletion the pull
+# will not perform. `git diff <tree>` only compares paths in the index, and the
+# index here is the snapshot -- so such a path is not compared at all. Measured:
+# a local-only file, untracked or committed, appears in neither direction.
+#
 # Every diff of a shadow ref must go through this. Calling `git diff` directly
-# on a shadow git-dir is the bug this function exists to prevent.
+# on a shadow git-dir is the bug this function exists to prevent -- and now also
+# the way to get the direction wrong.
 wip_shadow_diff() {
   local repo="$1" ref="$2"; shift 2
   local shadow; shadow="$(wip_shadow "$(wip_slug "$repo")")"
@@ -797,7 +816,7 @@ wip_shadow_diff() {
     printf 'wip: %s: no snapshot ref %s in the shadow cache\n' "$repo" "$ref" >&2
     return 1
   }
-  git --git-dir="$shadow" --work-tree="$repo" diff "$ref" "$@"
+  git --git-dir="$shadow" --work-tree="$repo" diff -R "$ref" "$@"
 }
 
 # The repo containing $PWD, or empty if we are not in one.
@@ -873,21 +892,60 @@ wip_snapshot_base() {
 
 # Classify a snapshot's base against the LOCAL HEAD. Prints exactly one word:
 #
-#   ok       base is an ancestor of HEAD. We already have the commit the other
-#            machine was sitting on, so `wip pull` is the whole answer.
+#   ok       base IS our HEAD. The two trees differ by exactly the other
+#            machine's uncommitted work, so `wip pull` is the whole answer and
+#            the diffstat means what it says.
+#   behind   base is a STRICT ancestor of HEAD: we have committed past the point
+#            the snapshot was taken on, so the other machine is behind us.
+#            `git pull` THERE, then re-push there. See below.
 #   ahead    base is an object we can see, but it is NOT in our history: the
 #            other machine has commits we do not (typically we have fetched but
-#            not merged). `git pull` first, then `wip pull`.
+#            not merged). `git pull` here first, then `wip pull`.
 #   unknown  base names no object here at all -- we have not even fetched it,
 #            or the other machine never pushed the commit. `git fetch` first.
 #   none     no usable base= in the message, or git answered something no
 #            documented exit status covers. Classification unavailable.
 #
-# The three exit statuses are `git merge-base --is-ancestor`'s own, measured
-# directly rather than inferred: 0 = ancestor, 1 = not an ancestor, 128 = the
-# argument is not a valid object name. Anything else maps to `none`, i.e. to
-# the behaviour this tool had before the classifier existed -- an unexpected
-# status must not turn `wip pull` into something that refuses everything.
+# The exit statuses are `git merge-base --is-ancestor`'s own, measured directly
+# rather than inferred: 0 = ancestor, 1 = not an ancestor, 128 = the argument is
+# not a valid object name. Anything else maps to `none`, i.e. to the behaviour
+# this tool had before the classifier existed -- an unexpected status must not
+# turn `wip pull` into something that refuses everything.
+#
+# FIVE states over three statuses, because 0 covers two unrelated situations and
+# for a while this function reported both as `ok`. "base is an ancestor of HEAD"
+# is true when base IS HEAD -- the comparable case -- and equally true when base
+# is a strict ancestor, which means every commit we have made since is missing
+# from the snapshot. The diffstat then contains all of it, shown as reversions,
+# and the notice said `run \`wip pull\`` with no warning at all. Measured on
+# artemis 2026-07-31: two commits at 12:10 against a snapshot still based on the
+# one before them turned a single new file into
+#
+#   ⬇  snapshot from ariane · 4 min ago · 8 files changed, 483 insertions(+), 37 deletions(-) · run `wip pull`
+#
+# and a single `y` would have reverted both commits into uncommitted changes.
+# This is the `ahead` bug (see the header above) arriving from the other side --
+# it was fixed in one direction only.
+#
+# The second `--is-ancestor`, with the arguments swapped, is what separates them:
+# two commits that are each an ancestor of the other are the same commit. It is
+# the same command as the first, so it inherits the read-only property this
+# function is REQUIRED to have (see below) rather than needing its own argument
+# -- a `rev-parse` pair comparing the two shas would work equally well, but
+# `--verify` takes only one revision at a time, so it would cost two processes on
+# the cd-hook path where this costs one.
+wip_base_state_ancestor_kind() {
+  local repo="$1" base="$2" rc=0
+  git -C "$repo" merge-base --is-ancestor HEAD "$base" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) printf 'ok'     ;;   # ancestor both ways: the same commit
+    1) printf 'behind' ;;   # strict ancestor: we have committed past it
+    # Unreachable in practice -- the forward call already resolved both commits,
+    # or it would have answered 128 and never got here. Falls back to the
+    # behaviour this tool had before the split, for the same reason `none` does.
+    *) printf 'ok'     ;;
+  esac
+}
 #
 # READ-ONLY against the user's repo, and that is a hard requirement, not a
 # nicety: this runs on every `cd` through the fish hook. `merge-base` never
@@ -916,7 +974,7 @@ wip_base_state() {
   [ -n "$base" ] || { printf 'none'; return 0; }
   git -C "$repo" merge-base --is-ancestor "$base" HEAD 2>/dev/null || rc=$?
   case "$rc" in
-    0)   printf 'ok'      ;;
+    0)   wip_base_state_ancestor_kind "$repo" "$base" ;;
     1)   printf 'ahead'   ;;
     128) printf 'unknown' ;;
     *)   printf 'none'    ;;
@@ -926,11 +984,12 @@ wip_base_state() {
 # One-line summary for the current repo, or empty. Used by both `wip` and the
 # fish cd-hook, so they can never disagree.
 #
-# Three distinct notices, because "there is a snapshot waiting" and "you can
+# Four distinct notices, because "there is a snapshot waiting" and "you can
 # apply it" are different claims and only one of them used to be made. The
-# diffstat is printed ONLY in the `ok` case: in the other two the two trees are
-# not comparable, and a number that is mostly other people's commits is worse
-# than no number at all.
+# diffstat is printed ONLY in the `ok` case: in the other three the two trees are
+# not comparable, and a number that is mostly somebody's commits -- the other
+# machine's under `ahead`, our OWN under `behind` -- is worse than no number at
+# all.
 #
 # The classification happens AFTER the "is there anything to announce" gate, on
 # purpose. This function runs on every `cd`, and the overwhelmingly common
@@ -966,6 +1025,12 @@ wip_notice() {
     ahead)
       printf '⬇  snapshot from %s · %s ago · based on %s, which is not in your history — run `git pull` first, then `wip pull`\n' \
         "$other" "$(wip_human_age "$age")" "$base" ;;
+    # The advice points at the OTHER machine, which is what makes this notice
+    # different from every other one here: nothing you can run locally makes the
+    # trees comparable, because the stale half is over there.
+    behind)
+      printf '⬇  snapshot from %s · %s ago · based on %s, which you have committed past — %s is behind you; `git pull` there, then re-push\n' \
+        "$other" "$(wip_human_age "$age")" "$base" "$other" ;;
     unknown)
       printf '⬇  snapshot from %s · %s ago · base %s is unknown here — run `git fetch` first (%s may not have pushed it)\n' \
         "$other" "$(wip_human_age "$age")" "$base" "$other" ;;

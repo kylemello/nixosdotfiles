@@ -12,7 +12,7 @@ never touches your branches. Committed work still travels by `git push`/`pull`.
 
 **It never modifies your repository.** No added remotes, no added refs, no
 touched `HEAD`, index, or working tree. That is the one hard requirement the
-design exists to satisfy, and 214 assertions enforce it. The single exception is
+design exists to satisfy, and 237 assertions enforce it. The single exception is
 `wip pull`, which is the whole point of `wip pull` — and it saves your previous
 state first.
 
@@ -42,27 +42,55 @@ other machine, `cd` into the repo and it tells you:
 ⬇  snapshot from artemis · 14 min ago · 3 files, +47 −12 · run `wip pull`
 ```
 
-## Read the notice carefully — there are three of them
+## Read the notice carefully — there are four of them
 
 A snapshot records the commit it was taken on top of. `wip` classifies that
 against your local `HEAD` and says something different in each case:
 
 ```
 ⬇  … · 3 files, +47 −12 · run `wip pull`
-   You have the base. Straightforward.
+   The base IS your HEAD. Straightforward, and the only case where the
+   diffstat means anything.
 
-⬇  … · based on a1b2c3d, which you do not have — run `git pull` first, then `wip pull`
+⬇  … · based on a1b2c3d, which is not in your history — run `git pull` first, then `wip pull`
    The other machine has commits you don't. Get them, THEN take the
    uncommitted work layered on top. Usually both, in that order.
+
+⬇  … · based on a1b2c3d, which you have committed past — ariane is behind you; `git pull` there, then re-push
+   YOU have commits the snapshot was never taken on. Nothing you run locally
+   fixes this; the stale half is on the other machine.
 
 ⬇  … · base a1b2c3d is unknown here — run `git fetch` first
    You cannot see that commit at all. It may not have been pushed anywhere.
    `wip pull` refuses outright here.
 ```
 
-The middle case is the common trap. Before this existed, `~/personal/Tautulli`
-reported *"1189 files changed, +15580 −230346 · run `wip pull`"* — the machines
-were 8 months apart and the right answer was `git fetch`.
+The two middle cases are the common traps, and they are the same hazard from
+opposite sides — a tree built on a commit that isn't yours. Before the second
+existed, `~/personal/Tautulli` reported *"1189 files changed, +15580 −230346 ·
+run `wip pull`"* — the machines were 8 months apart and the right answer was
+`git fetch`. Before the third existed, artemis reported *"8 files changed, +483
+−37 · run `wip pull`"* for a snapshot carrying one new file: artemis had
+committed twice at 12:10 and ariane's snapshot was still based on the commit
+before them, so 7 of the 8 files were **artemis's own commits shown as
+reversions**, and one `y` would have reverted them into uncommitted changes.
+
+Both live behind a separate confirmation in `wip pull`, and neither is bypassed
+by `--force` — that flag means "my working tree is dirty, overwrite it", not
+"yes, throw away commits".
+
+### Which way the numbers run
+
+The diffstat describes **what applying the snapshot does to your tree**, not the
+difference between the two trees in git's default direction. A new 79-line file
+arriving from the other machine reads `+79`. It used to read `79 deletions(-)`,
+because `git diff <ref>` measures *ref → your worktree*, which is backwards for
+an incoming change; in the `behind` case that inversion also made *your own*
+committed lines look like they were arriving rather than being destroyed.
+
+Only paths the snapshot actually has are counted, which is exactly the set
+`wip pull` writes — a file only you have is not reported as an incoming
+deletion, because `wip pull` would not remove it.
 
 ## Why folder names don't matter
 
@@ -92,7 +120,8 @@ per machine per repo, as you already do.
 
 1. Refuses if your tree is dirty, unless `--force`.
 2. Refuses if the snapshot's base is unknown to you, unless `--force`.
-3. Warns and asks for confirmation if the base is ahead of you.
+3. Warns and asks for a separate confirmation if the base is ahead of you, or if
+   you have committed past it. Neither is bypassed by `--force`.
 4. Saves your current tree to `refs/wip-safety/pre-pull` **before** touching
    anything — and refuses to proceed if that save fails.
 5. Shows the diff and asks.
@@ -228,9 +257,9 @@ origin fall back to a path-based slug, so they only pair if the paths match.
 
 ## `wip pull` refuses
 
-Read which of the three refusals it is — dirty tree, unknown base, or base
-ahead. Each names its own fix. `--force` bypasses the first two but not the
-confirmation on the third.
+Read which of the four refusals it is — dirty tree, unknown base, base ahead, or
+base behind. Each names its own fix, and "base behind" names it on the *other*
+machine. `--force` bypasses the first two but neither of the last two.
 
 ## `wip undo` says there's no snapshot
 
@@ -266,7 +295,9 @@ these are the shapes it took:
 | `wip pull` claims "previous tree saved" when it wasn't | The safety ref failed and the destructive checkout ran anyway. Now gated. |
 | `wip undo` stops working ~5 min after a pull | `fetch --prune` deleted the safety ref. Moved out of the pruned namespace. |
 | A snapshot silently replaced by an empty tree | `write-tree` returns the empty-tree hash on a broken temp index rather than erroring. Now checked. |
-| Enormous bogus diffstat, "run `wip pull`" | Base commit ignored. Now classified three ways. |
+| Enormous bogus diffstat, "run `wip pull`" | Base commit ignored. Now classified — see the next two rows for the two halves of it. |
+| Same, after the base was being classified | `merge-base --is-ancestor` answers 0 for "base IS HEAD" *and* for "base is a strict ancestor", and both were read as `ok`. The second means you have committed past the snapshot, so the diffstat is mostly your own commits shown as reversions and `wip pull` reverted them on one `y`. Now a fourth state, `behind`, with its own notice and its own confirmation. |
+| An incoming new file reported as deletions | `git diff <ref>` measures *ref → worktree*, the reverse of what the pull applies. Now `-R`, so the numbers describe what saying `y` does to your tree. |
 | `.git/index` modified every 5 minutes | `git status` writes the index when the stat cache is stale. Now `--no-optional-locks`. |
 
 The recurring theme is **silent failure**: a background timer nobody watches,

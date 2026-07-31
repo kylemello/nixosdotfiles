@@ -140,17 +140,23 @@ wip_safety_ref() {
 
 # Deliberate by design: never overwrite a working tree without consent.
 #
-# Three gates, in this order, and the order is the design:
+# Four gates, in this order, and the order is the design:
 #
 #   1. UNKNOWN BASE -- refuse outright (unless --force). Non-interactive.
 #   2. DIRTY TREE   -- refuse outright (unless --force). Non-interactive.
 #   3. BASE AHEAD   -- warn and take a separate confirmation. Interactive.
+#   4. BASE BEHIND  -- warn and take a separate confirmation. Interactive.
 #
 # Every refusal that can be decided without the user comes BEFORE any prompt, so
 # `wip pull` can never ask a question it was going to ignore. Gate 1 precedes
 # gate 2 because its remedy (`git fetch`) is free and non-destructive, while
 # gate 2's is `--force`, and being told to force your way past a dirty tree
 # before being told you are on the wrong base is advice in the wrong order.
+#
+# Gates 3 and 4 are mutually exclusive -- wip_base_state prints exactly one word
+# -- and are the two halves of the same hazard: applying a tree that was built on
+# a commit other than ours. 3 costs you the other machine's commits, 4 costs you
+# your own.
 wip_cmd_pull() {
   local repo slug shadow force="${1:-}" reply porcelain other base state
   repo="$(wip_cwd_repo)"
@@ -221,6 +227,37 @@ wip_cmd_pull() {
     printf 'Apply it anyway, without pulling first? [y/N] '
     # `|| reply=""` so an exhausted stdin aborts with a message rather than
     # taking the generated binary's `set -e` down mid-prompt.
+    read -r reply || reply=""
+    case "$reply" in
+      y|Y) ;;
+      *)   echo "wip: aborted."; return 0 ;;
+    esac
+  fi
+
+  # GATE 4. The mirror of gate 3, and the one that cost real work before it
+  # existed: the snapshot was taken on a commit we have since built on, so the
+  # checkout below writes the OTHER machine's older files over content we have
+  # already committed. Nothing is lost from git -- the commits are still there --
+  # but the working tree comes back as a pile of uncommitted reversions, which is
+  # indistinguishable from having thrown the work away until you look closely.
+  #
+  # The remedy is on the OTHER machine, which is what makes this gate's advice
+  # unlike every other refusal here: no local command makes the trees comparable.
+  #
+  # NOT bypassed by --force, for gate 3's reason exactly: --force here means "yes,
+  # my working tree is dirty, overwrite it", and one flag must not also wave
+  # through "yes, revert my commits".
+  if [ "$state" = behind ]; then
+    echo "wip: this snapshot was taken on top of $base, which you have since committed past."
+    echo "     $other is behind you: your HEAD has commits its snapshot was never taken on,"
+    echo "     so applying it REVERTS them into uncommitted changes. \`wip diff\` below is"
+    echo "     measuring two trees that are not comparable, and most of what it counts is"
+    echo "     your own committed work, not incoming work."
+    echo "     The order that works is \`git pull\` on $other, then re-push there (or wait for"
+    echo "     its next tick), then \`wip pull\` here."
+    printf 'Apply it anyway, reverting your commits? [y/N] '
+    # `|| reply=""` so an exhausted stdin aborts with a message rather than
+    # taking the generated binary's `set -e` down mid-prompt, as in gate 3.
     read -r reply || reply=""
     case "$reply" in
       y|Y) ;;
