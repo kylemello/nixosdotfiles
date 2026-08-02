@@ -1,7 +1,7 @@
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 
 {
-  home.packages = with pkgs; [
+  home.packages = (with pkgs; [
     _1password-cli
     air # Live reload for golang
     ansible
@@ -44,10 +44,15 @@
     terraform
     tokei
     tree-sitter
-    # Browser-mode test runners (Vitest/Playwright) download a prebuilt
-    # Chromium that expects an FHS filesystem and cannot start here. This one
-    # runs natively; the harness picks it up off PATH.
-    ungoogled-chromium
     uv
-  ];
+  ])
+  # Browser-mode test runners (Vitest/Playwright) download a prebuilt Chromium
+  # that expects an FHS filesystem and cannot start on the Linux hosts. This
+  # one runs natively; the harness picks it up off PATH. Linux-only both
+  # because that is the problem it solves — a Mac runs the downloaded build
+  # fine — and because nixpkgs' chromium has no darwin platform at all, which
+  # otherwise fails the ariane eval outright.
+  ++ lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+    ungoogled-chromium
+  ]);
 }
