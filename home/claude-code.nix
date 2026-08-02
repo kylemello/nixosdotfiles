@@ -45,6 +45,28 @@ let
       type = "http";
       url = "https://mcp.atlassian.com/v1/mcp/authv2";
     };
+    home-assistant = {
+      # HA's built-in "Model Context Protocol Server" integration, which the
+      # docs expose at /api/mcp over Streamable HTTP. The legacy /mcp_server/sse
+      # route still answers on this instance, but it is the older SSE transport
+      # — prefer /api/mcp.
+      #
+      # UNLIKE atlassian-aegis, this one canNOT use `/mcp` -> authenticate.
+      # HA's /.well-known/oauth-authorization-server is not RFC 8414 compliant
+      # (verified 2026-08-02): it omits `issuer` and returns *relative* paths
+      # ("/auth/authorize", "/auth/token", "/auth/revoke") where the spec wants
+      # absolute URLs, so Claude Code's metadata validation rejects it before
+      # the flow starts. Auth is therefore a long-lived access token instead.
+      #
+      # The token is a secret, so it is NOT declared here. It lives only in
+      # ~/.claude.json as `headers.Authorization`, added per host with
+      #   claude mcp add --scope user --transport http home-assistant \
+      #     https://ha.kmello.dev/api/mcp --header "Authorization: Bearer <t>"
+      # The jq merge below is recursive (`. * $d`) and this attrset declares no
+      # `headers` key, so that locally-added header survives every activation.
+      type = "http";
+      url = "https://ha.kmello.dev/api/mcp";
+    };
     git = {
       type = "stdio";
       command = "uvx";
