@@ -7,7 +7,7 @@
 # Usage:
 #   ./update.sh                 # target = current hostname (NixOS) or you pass a profile
 #   ./update.sh gateway         # rebuild a specific NixOS host
-#   ./update.sh kmello@iodine   # activate a standalone Home Manager profile
+#   ./update.sh ariane          # activate a standalone Home Manager profile
 #
 # Pass --no-switch to only run the updates and skip the rebuild.
 set -euo pipefail

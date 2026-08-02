@@ -48,7 +48,7 @@ Here is a breakdown of the key files and directories and their purpose.
 └── users/            # Top-level user profiles.
     └── kyle/
         ├── home.nix            # Main profile for all my NixOS machines.
-        └── work-kmello.nix     # Standalone profile for a non-NixOS work machine.
+        └── ariane.nix          # Standalone profile for a non-NixOS work machine.
 ```
 
 ---

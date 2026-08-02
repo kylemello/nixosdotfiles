@@ -30,7 +30,9 @@
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, catppuccin, claude-code, bitbucket-cli, ... }:
+  # catppuccin is deliberately not destructured here: the only consumer is
+  # home/catppuccin.nix, which reaches it through `inputs`.
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, claude-code, bitbucket-cli, ... }:
     let
       overlays = [
         (import ./overlays)
@@ -75,11 +77,6 @@
             "kyle-work" = home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               modules = [ ./users/kyle/work-kyle.nix ];
-              extraSpecialArgs = { inherit inputs; };
-            };
-            "kmello@iodine" = home-manager.lib.homeManagerConfiguration {
-              inherit pkgs;
-              modules = [ ./users/kyle/work-kmello.nix catppuccin.homeModules ];
               extraSpecialArgs = { inherit inputs; };
             };
             # macOS (aarch64-darwin) work laptop. Modeled on artemis's user

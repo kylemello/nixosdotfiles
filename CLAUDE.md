@@ -15,7 +15,7 @@ Personal, declarative Nix configuration for multiple machines (NixOS systems + s
 sudo nixos-rebuild switch --flake .#artemis
 
 # Apply a standalone Home Manager profile (non-NixOS hosts)
-home-manager switch --flake .#"kmello@iodine"   # or .#kyle-work, .#ariane
+home-manager switch --flake .#ariane            # or .#kyle-work
 
 # Update overlay-pinned packages (e.g. infisical) to latest upstream — see "Overlays" below
 nix run .#update-overlays
@@ -59,7 +59,7 @@ The `overlays` list is defined once in `flake.nix` and threaded into **both** Ni
 Standalone profiles:
 | Profile | Role |
 |---------|------|
-| `kyle-work`, `kmello@iodine` | Office remote work machines. (`kyle-work` imports a since-removed `home/common.nix` and is stale; `kmello@iodine` is the live one.) |
+| `kyle-work` | Office remote work machine. Stale — imports a since-removed `home/common.nix`, so it does not evaluate. (A second profile, `kmello@iodine` / `users/kyle/work-kmello.nix`, was removed; the `iodine` SSH host alias in `home/profiles/desktop.nix` stays.) |
 | `ariane` | macOS (`aarch64-darwin`) work laptop. **Home Manager only, no nix-darwin** (Homebrew keeps GUI casks; Nix owns the CLI toolchain). Mirrors artemis's user env via `users/kyle/ariane.nix` + `home/darwin.nix` (git signing through the macOS 1Password `op-ssh-sign`; forces fish inside tmux). Built on Determinate Nix. Linux-only pkgs (e.g. `msodbcsql18`) are guarded with `lib.optionals stdenv.isLinux`. |
 
 ## Overlays and the auto-update system
@@ -81,7 +81,7 @@ An updater is a sibling script **`overlays/<name>.update.sh`** taking the JSON p
 or takes a profile/host arg, and accepts `--no-switch` to update without rebuilding:
 ```fish
 ./update.sh                    # update overlays + inputs, then rebuild this host
-./update.sh kmello@iodine      # ...and activate a standalone Home Manager profile instead
+./update.sh ariane             # ...and activate a standalone Home Manager profile instead
 ```
 Equivalent manual steps:
 ```fish
