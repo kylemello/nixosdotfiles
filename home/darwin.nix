@@ -20,12 +20,30 @@ in
 
   # Land in fish inside tmux. NixOS hosts make fish the login shell
   # (users.defaultUserShell in hosts/common.nix), so tmux inherits it there.
-  # Standalone Home Manager on macOS can't set a login shell, so it stays zsh
-  # and tmux would otherwise spawn zsh in every window/pane. Force fish per
-  # pane. (For non-tmux terminals, set fish as your login shell with `chsh`.)
+  # Standalone Home Manager on macOS has no equivalent — the login shell lives
+  # in Open Directory, not in any file this profile can write — so tmux would
+  # otherwise spawn the account's zsh in every window/pane. Force fish per pane.
+  #
+  # Kept even now that the login shell below is fish: it makes tmux land in
+  # fish on a machine where the one-time chsh has not been run yet.
   programs.tmux.extraConfig = lib.mkAfter ''
     set -g default-command "${pkgs.fish}/bin/fish"
   '';
+
+  # Fish as the *login* shell, for terminals that aren't tmux. Two one-time
+  # steps as root, because `chsh` refuses a shell that isn't in /etc/shells and
+  # neither file is writable from standalone Home Manager:
+  #
+  #   echo "$HOME/.nix-profile/bin/fish" | sudo tee -a /etc/shells
+  #   sudo chsh -s "$HOME/.nix-profile/bin/fish" "$USER"
+  #
+  # Both name the profile symlink rather than a store path, for the same reason
+  # /etc/dotnet does below: the store path changes on every fish bump and would
+  # eventually be garbage-collected, which for a *login shell* means an account
+  # that cannot open a terminal. ~/.nix-profile is a GC root and Home Manager
+  # repoints it on each switch.
+  #
+  # Verify with `dscl . -read /Users/$USER UserShell`.
 
   # Logical host name for `wip` refs — NOT the machine's real hostname
   # (kyles-macbook-pro), which would make for confusing ref names. Enabled here

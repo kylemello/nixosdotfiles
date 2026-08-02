@@ -14,7 +14,17 @@
     devenv
     docker-buildx
     dolt
-    emacs-nox
+    # withMailutils only buys emacs `movemail`, and mailutils 3.21 no longer
+    # links on aarch64-darwin: libmu_sieve's uidnew extension leaves
+    # mu_url_{set_scheme,sget_path,to_string} undefined, which the macOS linker
+    # rejects outright where ELF would have let it slide.
+    #
+    #   ld: symbol(s) not found for architecture arm64
+    #
+    # Not an overlay, because that would rebuild emacs on the Linux hosts too,
+    # where mailutils is fine and cached. Revisit when nixpkgs' mailutils
+    # builds on darwin again.
+    (if stdenv.isDarwin then emacs-nox.override { withMailutils = false; } else emacs-nox)
     gcc
     gh
     gitleaks
