@@ -36,6 +36,8 @@
     pnpm
     ruby
     rustc
+    # secretspec is intentionally not listed: devenv ships its own
+    # bin/secretspec, and two copies collide in home-manager's buildEnv.
     sqlc # was a `go install` into ~/go/bin on artemis only
     sqlite
     tea

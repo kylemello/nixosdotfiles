@@ -1,5 +1,12 @@
 { config, lib, pkgs, ... }:
 
+let
+  # See home.packages below. The SDK is a superset of the runtime Storage
+  # Explorer actually needs; swap in dotnetCorePackages.runtime_10_0 to drop
+  # the `dotnet` CLI and most of the closure.
+  dotnet = pkgs.dotnetCorePackages.sdk_10_0;
+  dotnetRoot = "${dotnet}/share/dotnet";
+in
 {
   # macOS-specific user tweaks — the analogue of home/wsl.nix.
   #
@@ -73,4 +80,34 @@
     enable = true;
     host = "ariane";
   };
+
+  # .NET 10, for Microsoft Azure Storage Explorer. Here rather than in the
+  # shared home/packages/dev.nix because only this machine runs that app, and
+  # the SDK is a 1.3GB closure the Linux hosts have no use for.
+  #
+  # Storage Explorer 1.45 ships a ServiceHub host under
+  # Contents/Resources/app/ServiceHub/Hosts/microsoft-servicehub-host whose
+  # runtimeconfig.json asks for Microsoft.NETCore.App 10.0.0. With no runtime
+  # present it dies with "You must install .NET to run this application".
+  home.packages = [ dotnet ];
+
+  # For shells. Note this does NOT help Storage Explorer: that apphost never
+  # consults PATH, and a Finder-launched GUI inherits launchd's environment
+  # rather than fish's. It probes DOTNET_ROOT_ARM64, then DOTNET_ROOT, then
+  # /etc/dotnet/install_location_arm64, then /usr/local/share/dotnet.
+  home.sessionVariables.DOTNET_ROOT = dotnetRoot;
+
+  # ...so the GUI is pointed at .NET through /etc/dotnet, which standalone Home
+  # Manager (no nix-darwin here) cannot write. One-time, as root:
+  #
+  #   sudo mkdir -p /etc/dotnet
+  #   echo "$HOME/.local/share/dotnet" | sudo tee /etc/dotnet/install_location_arm64
+  #
+  # That file names the symlink below and not a store path directly, because
+  # the store path changes on every dotnet bump and /etc would rot into a
+  # garbage-collected path. Home Manager repoints the symlink on each switch.
+  #
+  # Not ~/.dotnet: that is dotnet's own user-install/tools directory, and
+  # handing it a read-only store symlink would break `dotnet tool install`.
+  home.file.".local/share/dotnet".source = dotnetRoot;
 }
