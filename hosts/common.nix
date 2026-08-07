@@ -112,22 +112,33 @@
       path = [ pkgs.coreutils ];
       serviceConfig = {
         Type = "simple";
-        # Main process: run the daemon in the foreground in "login" mode,
-        # feeding an empty password on stdin so the login keyring is
-        # created/unlocked with no prompt.
-        ExecStart = pkgs.writeShellScript "gnome-keyring-login" ''
-          exec ${pkgs.gnome-keyring}/bin/gnome-keyring-daemon --foreground --login < <(printf '\n')
+        # One foreground daemon that both unlocks the login keyring and serves
+        # org.freedesktop.secrets, feeding an empty password on stdin so nothing
+        # prompts.
+        #
+        # `--unlock`, not `--login`, and no `--replace`. Those two flags are
+        # mutually exclusive: given both, the daemon prints "The --replace option
+        # is incompatible with --login", drops the `--login` half, and carries on
+        # as a plain replace — so it never reads the password from stdin and
+        # leaves the login keyring locked. That is indistinguishable from a
+        # keyring with a real passphrase: libsecret clients get
+        # org.gnome.keyring.SystemPrompter GUI prompts on a host whose whole
+        # point is to never prompt, and the keyring looks password-protected when
+        # it is not. `--unlock` reads the same stdin password without `--login`'s
+        # PAM-specific behaviour and composes with `--components`, so one process
+        # covers both jobs and there is no second invocation to race.
+        ExecStart = pkgs.writeShellScript "gnome-keyring-unlock" ''
+          exec ${pkgs.gnome-keyring}/bin/gnome-keyring-daemon --foreground --unlock --components=secrets < <(printf '\n')
         '';
-        # Once the control socket is up, start the secrets component so
-        # org.freedesktop.secrets is published on the session bus.
-        ExecStartPost = pkgs.writeShellScript "gnome-keyring-start-secrets" ''
-          for _ in $(seq 1 50); do
-            [ -S "$XDG_RUNTIME_DIR/keyring/control" ] && break
-            sleep 0.1
-          done
-          ${pkgs.gnome-keyring}/bin/gnome-keyring-daemon --start --components=secrets
-        '';
-        Restart = "on-failure";
+        # `always`, not `on-failure`. `services.gnome.gnome-keyring.enable` above
+        # also installs D-Bus activation for org.freedesktop.secrets, so whenever
+        # this unit is not holding the bus name, the next libsecret client gets a
+        # dbus-spawned daemon instead — one that never read the empty password and
+        # serves the login keyring as locked. The daemon exiting 0 (it does, when
+        # it finds another instance already initialized) is exactly that gap, and
+        # `on-failure` treats a clean exit as nothing to do.
+        Restart = "always";
+        RestartSec = 1;
       };
     };
 }
