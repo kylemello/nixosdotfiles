@@ -157,6 +157,40 @@ in
       }
     ];
 
+    # `claude remote-control` asks "Enable Remote Control? (y/n)" the first time
+    # it runs on a machine and records the answer as remoteDialogSeen in
+    # ~/.claude.json. A systemd unit has no TTY and stdin at EOF, so it can
+    # never answer: the process exits, Restart=always brings it straight back,
+    # and the service hard-loops. Observed on gateway 2026-08-07 — the unit sat
+    # in "activating" with a climbing restart counter and the prompt as the last
+    # line of every journal entry.
+    #
+    # Declared rather than left to the one-time `printf 'y\n' | claude
+    # remote-control` that clears it by hand, because the failure comes straight
+    # back the moment ~/.claude.json is reset or this module reaches a new host.
+    #
+    # Kept out of home/claude-code.nix's merge on purpose: that module is
+    # imported by every host, and this key should only be asserted where a
+    # headless server actually needs it. Activation is one sequential script, so
+    # two read-modify-write merges of the same file cannot race — whichever runs
+    # second reads the first's output. The -e guard covers the ordering case
+    # where claudeCodeJson has not created the file yet; the key then lands on
+    # the next activation, and the service is idle until it does.
+    home.activation.claudeRemoteDialogSeen =
+      lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        claudeJson="$HOME/.claude.json"
+        jq=${pkgs.jq}/bin/jq
+        if [ -e "$claudeJson" ] && "$jq" -e . "$claudeJson" >/dev/null 2>&1; then
+          tmp="$(mktemp "$claudeJson.XXXXXX")"
+          if "$jq" '.remoteDialogSeen = true' "$claudeJson" > "$tmp"; then
+            $DRY_RUN_CMD mv "$tmp" "$claudeJson"
+          else
+            rm -f "$tmp"
+            echo "claude-remote: failed to set remoteDialogSeen in $claudeJson" >&2
+          fi
+        fi
+      '';
+
     systemd.user.services.claude-remote = {
       Unit = {
         Description = "Claude Code Remote Control server";
