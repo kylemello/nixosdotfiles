@@ -128,8 +128,15 @@ in
     # ProtectHome does not mask. Seth still reaches it via the `ci` group.
   };
 
-  # Assign the Home Manager profile to the user
-  home-manager.users.kyle = import ../../users/kyle/home.nix;
+  # Assign the Home Manager profile to the user. The shared profile plus the
+  # gateway-specific user layer, mirroring how artemis pairs it with
+  # home/wsl.nix — see home/gateway.nix.
+  home-manager.users.kyle = {
+    imports = [
+      ../../users/kyle/home.nix
+      ../../home/gateway.nix
+    ];
+  };
 
   system.stateVersion = "25.05";
 }
