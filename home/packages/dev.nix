@@ -32,6 +32,7 @@
     gnumake
     go
     infisical
+    infracost
     jdk
     kubectl
     kubernetes-helm

@@ -19,6 +19,7 @@
     ripgrep
     tealdeer
     unzip
+    zip
     wget
     xh
     yq-go
