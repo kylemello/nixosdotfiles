@@ -1,6 +1,8 @@
 { lib, pkgs, config, ... }:
-# Declarative Claude Code MCP servers. This registers user-scope MCP servers so every host that
-# imports this module sees the same set — no per-machine `claude mcp add` needed.
+# Declarative slices of ~/.claude.json: the user-scope MCP servers, and the trust
+# flag for the home directory (see homeTrust below). Everything here is merged in
+# so every host that imports this module sees the same set — no per-machine
+# `claude mcp add` needed.
 #
 # Auth is OAuth, so NOTHING secret lives here: after a rebuild, run
 #   claude mcp login personal
@@ -98,11 +100,39 @@ let
     baseServers
     // lib.optionalAttrs config.kyle.claude.enable workstationServers;
 
-  # Only the servers declared above are managed; everything else in ~/.claude.json
-  # (projects, history, cached auth) is preserved by the deep-merge below. Note the
-  # merge only ever ADDS: dropping a server from this set does not remove it from
-  # a host that already has it — do that with `claude mcp remove`.
-  desired = builtins.toJSON { inherit mcpServers; };
+  # Claude Code refuses to PERSIST the trust decision when its cwd is exactly the
+  # home directory. The accept handler branches on `os.homedir() === cwd()` and,
+  # for that case, sets an in-process `sessionTrustAccepted` flag INSTEAD of
+  # writing projects[cwd].hasTrustDialogAccepted into ~/.claude.json (read out of
+  # the claude-code 2.1.221 bundle, 2026-08-07). So `claude` launched from ~ re-asks
+  #   Quick safety check: Is this a project you created or one you trust?
+  # on every single start, no matter how many times it is accepted. Writing the key
+  # ourselves is the fix: the trust *check* reads it the same either way, and the
+  # dialog component self-skips once it finds the folder already trusted. The flag
+  # is only ever set, never cleared, so this survives Claude Code's own rewrites.
+  #
+  # The reason for that special case, and the trade-off being accepted here: with
+  # cwd = ~, Claude Code treats ~/.claude/ as *project* settings, so the global
+  # settings.json/hooks/MCP servers get counted as folder-supplied config — exactly
+  # what the dialog exists to warn about. On top of that the trust check walks UP
+  # the directory tree, so a trusted ~ transitively trusts everything beneath it:
+  # any repo cloned anywhere under ~ from now on has its .claude/settings.json
+  # allow rules, hooks and .mcp.json servers applied without a prompt. ~/work and
+  # ~/personal were already trusted individually, so what this really widens is
+  # newly-cloned paths.
+  #
+  # Gated on kyle.claude.enable, like workstationServers above, so
+  # atlas/gateway/nixosvm — which nobody drives Claude Code from — keep the prompt.
+  homeTrust = lib.optionalAttrs config.kyle.claude.enable {
+    projects.${config.home.homeDirectory}.hasTrustDialogAccepted = true;
+  };
+
+  # Only what is declared above is managed; everything else in ~/.claude.json
+  # (other projects, history, cached auth) is preserved by the deep-merge below.
+  # Note the merge only ever ADDS: dropping a server from this set does not remove
+  # it from a host that already has it — do that with `claude mcp remove`. Likewise
+  # dropping homeTrust does not re-arm the prompt; clear the key by hand for that.
+  desired = builtins.toJSON ({ inherit mcpServers; } // homeTrust);
 in
 {
   # For config.kyle.claude.enable above. Imported here as well as from the user
@@ -111,9 +141,10 @@ in
 
   # ~/.claude.json is a mutable file Claude Code owns at runtime, so we can't render it
   # with home.file (that would clobber its state). Instead, idempotently deep-merge our
-  # declared servers into it on each activation. `jq`'s `*` recursively merges objects,
-  # so existing keys survive and our servers are added/refreshed.
-  home.activation.claudeCodeMcpServers =
+  # declared slices into it on each activation. `jq`'s `*` recursively merges objects,
+  # so existing keys survive and ours are added/refreshed — including the single key
+  # homeTrust adds under an existing projects[~] entry, which keeps its siblings.
+  home.activation.claudeCodeJson =
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       claudeJson="$HOME/.claude.json"
       desired='${desired}'
@@ -127,10 +158,10 @@ in
           $DRY_RUN_CMD mv "$tmp" "$claudeJson"
         else
           rm -f "$tmp"
-          echo "claude-code: failed to merge MCP servers into $claudeJson" >&2
+          echo "claude-code: failed to merge declared config into $claudeJson" >&2
         fi
       else
-        echo "claude-code: $claudeJson is not valid JSON; skipping MCP server merge" >&2
+        echo "claude-code: $claudeJson is not valid JSON; skipping config merge" >&2
       fi
     '';
 }
