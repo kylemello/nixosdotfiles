@@ -185,6 +185,67 @@
         '';
       };
 
+      # --- Command timing -------------------------------------------------
+      #
+      # Reports when the last command started and how long it ran, right-aligned
+      # on the prompt's info line. Three pieces: fish_preexec stamps the wall
+      # clock the moment you hit Enter, fish_postexec captures $CMD_DURATION
+      # once the command returns, and fish_prompt renders both.
+      #
+      # fish_prompt only *reads* these globals — it never erases them. That
+      # matters because fish re-runs fish_prompt on repaint (vi mode switches,
+      # terminal resizes), and a one-shot "show once then clear" flag would make
+      # the timing vanish the first time you pressed Escape.
+      #
+      # The trade-off: fish fires neither event for a bare Enter on an empty
+      # command line (verified), so the last real command's timing stays on
+      # screen until the next command runs. It repeats rather than going stale —
+      # the numbers always describe the most recent command. Starship behaves
+      # the same way.
+
+      __prompt_format_duration = {
+        description = "Humanize a millisecond duration for the prompt";
+        argumentNames = [ "ms" ];
+        body = ''
+          if test $ms -lt 1000
+                  printf '%dms' $ms
+          else if test $ms -lt 60000
+                  # Floor to hundredths rather than letting -s2 round: 59999ms
+                  # would otherwise render as "60.00s" in the sub-minute branch.
+                  printf '%.2fs' (math -s2 "floor($ms / 10) / 100")
+          else
+                  set -l secs (math -s0 "floor($ms / 1000)")
+                  set -l h (math -s0 "floor($secs / 3600)")
+                  set -l m (math -s0 "floor($secs % 3600 / 60)")
+                  set -l s (math -s0 "$secs % 60")
+                  if test $h -gt 0
+                          printf '%dh%02dm%02ds' $h $m $s
+                  else
+                          printf '%dm%02ds' $m $s
+                  end
+          end
+        '';
+      };
+
+      __prompt_timing_start = {
+        description = "Stamp the wall clock when a command is launched";
+        onEvent = "fish_preexec";
+        # %-I gives an unpadded 12-hour clock on both GNU and BSD date, to match
+        # the %I:%M:%S %p style already used by the eza aliases above.
+        body = ''
+          set -g __prompt_cmd_start (date '+%-I:%M:%S %p')
+        '';
+      };
+
+      __prompt_timing_end = {
+        description = "Capture the finished command's duration for the prompt";
+        onEvent = "fish_postexec";
+        body = ''
+          set -g __prompt_cmd_ms $CMD_DURATION
+          set -g __prompt_cmd_at $__prompt_cmd_start
+        '';
+      };
+
       fish_prompt = ''
         set -l last_status $status
         set -l normal (set_color normal)
@@ -212,7 +273,57 @@
                 set prompt_status $status_color "[" $last_status "]" $normal
         end
 
-        echo -s (prompt_login) ' ' $cwd_color (prompt_pwd) $vcs_color (fish_vcs_prompt) $normal ' ' $prompt_status
+        # Timing for the command that just finished, if one has run yet.
+        # The threshold gates only the duration; the timestamp always shows.
+        set -l timing ""
+        if set -q __prompt_cmd_at
+                set -l bits
+                set -q fish_prompt_duration_threshold
+                or set -g fish_prompt_duration_threshold 0
+                if test $__prompt_cmd_ms -ge $fish_prompt_duration_threshold
+                        set -a bits (__prompt_format_duration $__prompt_cmd_ms)
+                end
+                set -a bits $__prompt_cmd_at
+                set timing (set_color brblack)(string join '  ' $bits)$normal
+        end
+
+        set -l line (string join "" (prompt_login) ' ' $cwd_color (prompt_pwd) $vcs_color (fish_vcs_prompt) $normal ' ' $prompt_status)
+
+        # Pad the info line out so the timing sits flush right. string length
+        # --visible measures past the color escapes; $COLUMNS tracks resizes.
+        # If the two halves would collide, fall back to a plain inline gap
+        # rather than wrapping the line.
+        if test -n "$timing"
+                set -l width $COLUMNS
+                test -n "$width"; or set width 80
+
+                # fish prints fish_mode_prompt (the vi [I]/[N] indicator) inline
+                # ahead of this line, so its width is invisible to us here.
+                # Unaccounted for, the line runs $COLUMNS + 4 wide and fish
+                # truncates the front of the prompt to a "…". Re-run it purely to
+                # measure — the default one only reads $fish_bind_mode, no side
+                # effects. Command substitution splits its output on newlines, so
+                # rejoin before measuring.
+                set -l mode_width 0
+                if functions -q fish_mode_prompt
+                        set -l mp (string join "" (fish_mode_prompt))
+                        test -n "$mp"; and set mode_width (string length --visible -- $mp)
+                end
+
+                set -l lw (string length --visible -- $line)
+                set -l tw (string length --visible -- $timing)
+                # The trailing -1 keeps the last column free. Writing into it
+                # relies on deferred-wrap behaviour that tmux and some terminals
+                # get wrong, and a stray wrap here would break the two-line prompt.
+                set -l pad (math -s0 "$width - $mode_width - $lw - $tw - 1")
+                if test $pad -ge 1
+                        set line $line(string repeat -n $pad ' ')$timing
+                else
+                        set line $line'  '$timing
+                end
+        end
+
+        echo -s $line
         echo -n -s $status_color $suffix ' ' $normal
       '';
     };
@@ -222,6 +333,14 @@
       bind -M insert \ct _fzf_search_directory
       fish_vi_key_bindings
       set -g fish_greeting
+
+      # Minimum command duration (ms) before the prompt reports it; 0 shows every
+      # command. To try "only flag slow commands", run
+      #   set -g fish_prompt_duration_threshold 5000
+      # in a live shell — it takes effect on the next prompt, no rebuild — then
+      # change the default here once you've settled on a number. The start
+      # timestamp is always shown regardless of this setting.
+      set -g fish_prompt_duration_threshold 0
       set fish_cursor_default block
       set fish_cursor_insert line
       set fish_cursor_visual underscore
