@@ -43,5 +43,15 @@ if [ -e /etc/NIXOS ]; then
   sudo nixos-rebuild switch --flake ".#$target"
 else
   echo ">>> Activating Home Manager profile: .#$target"
-  home-manager switch --flake ".#$target"
+  # -b backup, because the FIRST activation after a program moves from a bare
+  # home.packages entry to its `programs.*` module always lands on a config the
+  # tool already wrote for itself, and Home Manager refuses to clobber it:
+  #
+  #   Existing file '…/k9s/config.yaml' would be clobbered
+  #
+  # That aborts the whole run -- flake inputs already updated, nothing
+  # activated -- for what is invariably a file of stock defaults. With this,
+  # the file is renamed to <name>.backup and activation continues. It is a
+  # no-op on every subsequent run, since Home Manager then owns the path.
+  home-manager switch --flake ".#$target" -b backup
 fi
