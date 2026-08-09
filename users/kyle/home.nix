@@ -8,6 +8,7 @@
     ../../home/tmux.nix
     ../../home/catppuccin.nix
     ../../home/claude-code.nix
+    ../../home/k9s.nix
     # Options only — deliberately NOT enabled here. This profile is imported by
     # all four NixOS hosts (artemis, atlas, gateway, nixosvm); `wip`, the drift
     # alarm, atuin, the shared ~/.claude and Syncthing are turned on per-host,

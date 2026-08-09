@@ -11,6 +11,7 @@
     ../../home/tmux.nix
     ../../home/catppuccin.nix
     ../../home/claude-code.nix
+    ../../home/k9s.nix
 
     ../../home/packages/base.nix
     ../../home/packages/dev.nix
