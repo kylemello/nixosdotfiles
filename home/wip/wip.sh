@@ -134,7 +134,14 @@ wip_hub_ssh() {
   local ssh="${WIP_SSH:-ssh}" ctldir
   local -a opts=()
   if [ -n "${WIP_SSH_IDENTITY:-}" ]; then
-    opts+=(-i "$WIP_SSH_IDENTITY" -o IdentitiesOnly=yes)
+    # IdentityAgent=none is as load-bearing as IdentitiesOnly, and must stay in
+    # step with hubSshOpts in home/wip.nix (see the long note there). Short
+    # version: IdentityFile ACCUMULATES, so 1Password's generated
+    # ~/.ssh/1Password/config appends its own `Match Host gateway` key after the
+    # -i one and IdentitiesOnly permits both. The on-disk key normally wins, but
+    # whenever that first attempt lost the connection ssh fell through to the
+    # agent and raised an approval dialog -- intermittently, forever.
+    opts+=(-i "$WIP_SSH_IDENTITY" -o IdentitiesOnly=yes -o IdentityAgent=none)
   fi
   if [ -n "${WIP_SSH_CONTROL:-}" ]; then
     # ssh does NOT create the ControlPath's parent, and a missing one is fatal

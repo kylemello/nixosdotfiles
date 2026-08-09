@@ -45,6 +45,32 @@ let
     # agent signs, and the approval prompt this whole change exists to remove
     # comes straight back.
     "-o IdentitiesOnly=yes"
+    # IdentitiesOnly is NOT enough on its own, which cost us intermittent
+    # approval prompts long after the dedicated key landed. IdentityFile is
+    # CUMULATIVE in ssh_config -- entries append to a list, they do not
+    # first-win -- and ariane's ~/.ssh/config includes 1Password's generated
+    # ~/.ssh/1Password/config, which carries:
+    #
+    #   Match Host gateway
+    #     IdentityFile ~/.ssh/1Password/SHA256_PoAO….pub
+    #
+    # So the effective list is [wip_hub_ed25519, <1Password gateway key>], and
+    # IdentitiesOnly=yes happily permits BOTH -- it only bars agent keys absent
+    # from the list. Confirm with:
+    #   ssh -G -i ~/.ssh/wip_hub_ed25519 -o IdentitiesOnly=yes gateway | grep -i identity
+    #
+    # The on-disk key is offered first and normally wins, which is why this
+    # stayed hidden: only when that first attempt lost the connection (gateway
+    # rebooting, wifi dropping -- `Connection reset by 10.11.12.105 port 22` in
+    # ~/.local/state/wip/agent.log) did ssh fall through to entry two, hit the
+    # agent, and prompt. Every five minutes, but only sometimes.
+    #
+    # Cutting the agent off the hub path entirely makes the fallback
+    # unreachable: entry two is a bare .pub whose private half exists only
+    # inside 1Password, so with no agent ssh cannot sign with it and fails
+    # loudly in agent.log instead of raising a dialog. GitHub and commit
+    # signing are untouched -- they do not go through hubSshOpts.
+    "-o IdentityAgent=none"
     "-o ControlMaster=auto"
     "-o ControlPath=${controlPath}"
     "-o ControlPersist=60"
