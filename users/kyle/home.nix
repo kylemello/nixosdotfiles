@@ -11,8 +11,8 @@
     ../../home/k9s.nix
     # Options only — deliberately NOT enabled here. This profile is imported by
     # all four NixOS hosts (artemis, atlas, gateway, nixosvm); `wip`, the drift
-    # alarm, atuin, the shared ~/.claude and Syncthing are turned on per-host,
-    # in home/wsl.nix (artemis).
+    # alarm, atuin, the shared ~/.claude, the shared ~/.config/nvim and
+    # Syncthing are turned on per-host, in home/wsl.nix (artemis).
     #
     # home/sync.nix especially: gateway already runs the system Syncthing
     # (hosts/sync-hub.nix), and a second user-level one there would share its
@@ -22,6 +22,7 @@
     ../../home/drift.nix
     ../../home/atuin.nix
     ../../home/claude.nix
+    ../../home/nvim.nix
     ../../home/sync.nix
 
     ../../home/packages/base.nix

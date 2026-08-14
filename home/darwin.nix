@@ -92,6 +92,10 @@ in
     host = "ariane";
   };
 
+  # ~/.config/nvim symlinked out of this repo and shared with artemis. Enabled
+  # here, not in a shared profile — see home/nvim.nix.
+  kyle.nvim.enable = true;
+
   # ~/notes and ~/scratch through the gateway Syncthing hub. Enabled here, not
   # in a shared profile — see home/sync.nix.
   kyle.sync = {

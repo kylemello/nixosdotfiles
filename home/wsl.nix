@@ -122,6 +122,10 @@
     host = "artemis";
   };
 
+  # ~/.config/nvim symlinked out of this repo and shared with ariane. Enabled
+  # HERE for the same checkout reason as kyle.claude — see home/nvim.nix.
+  kyle.nvim.enable = true;
+
   # ~/notes and ~/scratch through the gateway Syncthing hub. Enabled HERE and
   # never in users/kyle/home.nix — that profile reaches gateway, which already
   # runs the hub itself. See home/sync.nix for what that mistake does.
