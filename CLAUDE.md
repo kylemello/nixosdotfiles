@@ -8,6 +8,19 @@ Personal, declarative Nix configuration for multiple machines (NixOS systems + s
 
 > The `README.md` predates some refactors and is partly stale (it references `overlays/latest-packages.nix` and `home/common.nix`, which no longer exist, and lists only one machine). When the two disagree, trust this file.
 
+## This repo is PUBLIC
+
+`github.com/kylemello/nixosdotfiles` is a **public** repository. Anything committed here is world-readable and stays in the history after a later deletion. Treat every write as publication.
+
+Before writing, staging, or committing anything:
+
+- **Never commit secrets.** No API keys, tokens, bearer headers, passwords, private keys, `.env` contents, session cookies, or connection strings with credentials. Secrets go in a file outside the repo that Nix *references by path* — the established patterns are `guiPasswordFile = "/var/lib/syncthing/gui-password"` (`hosts/sync-hub.nix`) and the Home Assistant MCP token living only in `~/.claude.json` (`home/claude-code.nix`). Public SSH keys, Syncthing device IDs and hashed-nothing config are fine; their private halves are not.
+- **`claude/` and `nvim/` are live working-copy symlink targets, and the tools themselves write into them.** `~/.claude/{settings.json,CLAUDE.md,skills,…}` (`home/claude.nix`) and `~/.config/nvim` (`home/nvim.nix`) are `mkOutOfStoreSymlink`s into this repo, so `/config`, "always allow", `/plugin`, `:Lazy update` and `:LazyExtras` all edit tracked files. A secret Claude Code writes into `settings.json` lands in a public repo without anyone editing a file. **Read the diff of these paths before staging them** — never `git add -A` / `git commit -a` blind.
+- **Scan before committing** when the diff touches anything credential-shaped: `gitleaks git --no-banner --redact -v` (history) and `gitleaks dir . --no-banner --redact -v` (working tree, incl. untracked). `gitleaks` is already in `home/packages/dev.nix`. Clean as of 2026-08-14 across 138 commits and the working tree.
+- `.claude/settings.local.json` is kept out only by `~/.config/git/ignore`, a hand-made local file that **Home Manager does not manage** — so a fresh clone on another machine has no such guard. Don't rely on it; check `git status` output rather than assuming an ignore rule exists.
+- Non-secret but publicly visible recon surface already in here, which is accepted: internal hostnames (`gitea`/`ha`/`mcp`/`lan.kmello.dev`), private IPs, `gateway`'s SSH port 422, Syncthing device IDs, both email addresses, authorized SSH public keys. Don't add *more* of this than a change needs, and don't paste new internal URLs, ticket contents, or work data into comments.
+- Anything genuinely secret that reaches a commit is **compromised, not fixable by a follow-up commit**: say so immediately and rotate the credential. History rewriting is the user's call, never a silent cleanup.
+
 ## Common commands
 
 ```fish
@@ -41,6 +54,7 @@ Three composable layers, assembled in `flake.nix`:
 - **`hosts/`** — reusable *system* modules ("features"): `common.nix` (base for every NixOS host: nix settings, GC, users, docker, nix-ld), `wsl.nix`, `desktop.nix`, `vm.nix`.
 - **`machines/<name>/configuration.nix`** — a concrete NixOS host: sets `networking.hostName`, imports the `hosts/` features it needs, and assigns `home-manager.users.kyle` a profile from `users/`.
 - **`users/` + `home/`** — Home Manager (the *user* environment). `users/kyle/*.nix` are entry profiles that import modules from `home/`. Package sets live in `home/packages/{base,dev,misc}.nix`. WSL-specific user tweaks (e.g. `ssh.exe`, 1Password agent) are in `home/wsl.nix`.
+- **`claude/` + `nvim/`** — plain (non-Nix) config trees symlinked into `$HOME` from the live working copy by `home/claude.nix` and `home/nvim.nix`. Both are behind `kyle.<name>.enable`, off in `users/kyle/home.nix` and turned on only in `home/wsl.nix` (artemis) and `home/darwin.nix` (ariane) — the two machines that have a checkout to point at. See the public-repo section above before editing them.
 
 `flake.nix` outputs:
 - **`nixosConfigurations`** — built via the local `mkNixOS` helper, which applies the `overlays` list, wires the `home-manager` NixOS module (`useGlobalPkgs`/`useUserPackages`, so HM shares the system `pkgs` and overlays), and always includes `nixos-wsl` (`wsl.enable` only turns on where `hosts/wsl.nix` is imported).
