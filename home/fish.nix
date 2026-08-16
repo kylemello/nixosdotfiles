@@ -203,6 +203,11 @@
       # the numbers always describe the most recent command. Starship behaves
       # the same way.
 
+      # This format is implemented a second time, in SQL, by the Ctrl-R history
+      # picker in home/atuin.nix — Atuin's own {duration} is pre-rounded to whole
+      # seconds and cannot reproduce it. The two MUST stay in agreement; a picker
+      # that disagreed with the prompt about how long a command took would be
+      # worse than showing nothing. Change this, change that query.
       __prompt_format_duration = {
         description = "Humanize a millisecond duration for the prompt";
         argumentNames = [ "ms" ];
