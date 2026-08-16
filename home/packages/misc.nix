@@ -7,7 +7,6 @@
     dive
     fastfetch
     ffmpeg
-    gemini-cli
     ncdu
     postgresql_18
     tesseract
