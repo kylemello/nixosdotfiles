@@ -19,7 +19,7 @@
   # The Microsoft SQL Server ODBC driver (msodbcsql18) is Linux-only in
   # nixpkgs, so keep it (and unixODBC alongside it) off non-Linux hosts such as
   # the ariane Mac.
-  ++ lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (with pkgs; [
     unixodbc
     unixodbcDrivers.msodbcsql18
   ]);

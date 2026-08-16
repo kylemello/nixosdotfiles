@@ -24,7 +24,7 @@
     # Not an overlay, because that would rebuild emacs on the Linux hosts too,
     # where mailutils is fine and cached. Revisit when nixpkgs' mailutils
     # builds on darwin again.
-    (if stdenv.isDarwin then emacs-nox.override { withMailutils = false; } else emacs-nox)
+    (if stdenv.hostPlatform.isDarwin then emacs-nox.override { withMailutils = false; } else emacs-nox)
     gcc
     gh
     gitleaks
@@ -63,7 +63,7 @@
   # because that is the problem it solves — a Mac runs the downloaded build
   # fine — and because nixpkgs' chromium has no darwin platform at all, which
   # otherwise fails the ariane eval outright.
-  ++ lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (with pkgs; [
     ungoogled-chromium
   ]);
 }

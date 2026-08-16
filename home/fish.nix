@@ -144,7 +144,7 @@
 
           # 5. Call Claude
           set -l system_prompt "You are a command generator for fish shell on ${
-            if pkgs.stdenv.isDarwin then "macOS (nix-managed)" else "NixOS/WSL2"
+            if pkgs.stdenv.hostPlatform.isDarwin then "macOS (nix-managed)" else "NixOS/WSL2"
           }. Output ONLY the raw shell command. No explanations, no markdown, no backticks, no code blocks. If multiple commands are needed, join with && or ; on one line."
           set -l response (claude -p --model $model --effort low --tools "" --no-session-persistence --system-prompt "$system_prompt" "$query" 2>/dev/null)
           set -l exit_code $status

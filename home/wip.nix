@@ -466,7 +466,7 @@ in
       # every platform (systemd.user.enable itself defaults to isLinux) — but it
       # keeps the units from being generated on a hypothetical Darwin host that
       # enabled wip through the shared profile.
-      systemd.user = lib.mkIf pkgs.stdenv.isLinux {
+      systemd.user = lib.mkIf pkgs.stdenv.hostPlatform.isLinux {
         services.wip = {
           Unit.Description = "Snapshot dirty working trees to the sync hub";
           Service = {
@@ -502,7 +502,7 @@ in
       # attribute — HM declares launchd.agents on every platform, and its
       # assertion is (launchd.enable && agents != {}) -> isDarwin with
       # launchd.enable defaulting to isDarwin, so this is belt-and-braces too.
-      launchd.agents.wip = lib.mkIf pkgs.stdenv.isDarwin {
+      launchd.agents.wip = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin {
         enable = true;
         config = {
           ProgramArguments = [ "${tick}" ];
