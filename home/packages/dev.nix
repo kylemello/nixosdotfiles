@@ -47,8 +47,10 @@
     pnpm
     ruby
     rustc
-    # secretspec is intentionally not listed: devenv ships its own
-    # bin/secretspec, and two copies collide in home-manager's buildEnv.
+    # devenv bundles its own bin/secretspec (2.2.1 ships 0.17.1), so the two
+    # collide in home-manager's buildEnv. hiPrio makes nixpkgs' newer standalone
+    # build win the symlink; devenv still uses its bundled copy internally.
+    (lib.hiPrio secretspec)
     sqlc # was a `go install` into ~/go/bin on artemis only
     sqlite
     tea
