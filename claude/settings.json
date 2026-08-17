@@ -5,6 +5,18 @@
     "sessionUrl": false
   },
   "includeCoAuthoredBy": false,
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Style reminder: follow the Response style section of ~/.claude/CLAUDE.md. Answer first, no preamble, no recap, no tool narration. Never trim warnings, failures, or anything you skipped.'"
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(podman ps:*)",

@@ -4,44 +4,25 @@
 # so every host that imports this module sees the same set — no per-machine
 # `claude mcp add` needed.
 #
-# Auth is OAuth, so NOTHING secret lives here: after a rebuild, run
-#   claude mcp login personal
-# ONCE per host to grant the token (stored in the OS keychain / Secret Service, not git).
+# Auth is OAuth or a runtime-added token, so NOTHING secret lives here; the
+# grants land in the OS keychain / Secret Service or in ~/.claude.json, not git.
 #
 # The `claude-code` package itself is installed via home/packages/misc.nix.
 let
-  # Extend this to add more endpoints later, e.g. a `work` endpoint on work hosts.
+  # Added only on the machines that actually drive Claude Code interactively
+  # (kyle.claude.enable — artemis and ariane), which keeps atlas/gateway/nixosvm
+  # byte-identical while still ending the per-machine drift these servers had
+  # accumulated: as measured 2026-07-28 they had been added with `claude mcp add`
+  # and each lived on exactly one machine (git/kubernetes/atlassian-aegis on
+  # artemis, teams-mcp on ariane). All are portable — `uvx` comes from `uv` and
+  # `npx` from `nodejs_24`, both in home/packages/dev.nix, and the rest are plain
+  # URLs.
   #
-  # Split in two on purpose. This module is imported by users/kyle/home.nix, so it
-  # reaches all four NixOS hosts; `personal` has been deployed to all of them since
-  # 2026-07-19 and stays there. The `workstation` set below is added only on the
-  # machines that actually drive Claude Code interactively (kyle.claude.enable —
-  # artemis and ariane), which keeps atlas/gateway/nixosvm byte-identical while
-  # still ending the per-machine drift these four servers had accumulated: as
-  # measured 2026-07-28 they had been added with `claude mcp add` and each lived
-  # on exactly one machine (git/kubernetes/atlassian-aegis on artemis, teams-mcp
-  # on ariane). All four are portable — `uvx` comes from `uv` and `npx` from
-  # `nodejs_24`, both in home/packages/dev.nix, and the rest are plain URLs.
-  #
-  # Declaring a server does NOT authenticate it: `personal` still needs
-  # `claude mcp login personal`, and `atlassian-aegis` still needs one interactive
-  # `/mcp` -> authenticate -> pick the `aegistherapies` site, once per host. (That
-  # replaces the manual `claude mcp add` step documented in ~/work/claude-plugins/README.md,
-  # which aegis-jira's creating-adt-tickets skill hard-depends on by name.)
-  # REMOVED 2026-07-28: the MetaMCP `personal` endpoint. Its OAuth flow rejects
-  # Claude Code's loopback callback --
-  #   Invalid redirect URI: http://localhost:3118/callback.
-  #   Must use secure scheme and valid format.
-  # -- which RFC 8252 s7.3 and OAuth 2.1 both explicitly permit for native
-  # clients. artemis only kept working because it held a token granted before
-  # that restriction; ariane could never complete a login. Rather than relax the
-  # server, the MetaMCP deployment is being retired.
-  #
-  # Nothing is declared for every host now, so baseServers is empty. Keep it:
-  # it is the seam where a genuinely universal server would go, and dropping it
-  # would mean reshaping the merge below to add one back.
-  baseServers = { };
-
+  # Declaring a server does NOT authenticate it: `atlassian-aegis` still needs one
+  # interactive `/mcp` -> authenticate -> pick the `aegistherapies` site, once per
+  # host. (That replaces the manual `claude mcp add` step documented in
+  # ~/work/claude-plugins/README.md, which aegis-jira's creating-adt-tickets skill
+  # hard-depends on by name.)
   workstationServers = {
     atlassian-aegis = {
       type = "http";
@@ -96,9 +77,7 @@ let
     };
   };
 
-  mcpServers =
-    baseServers
-    // lib.optionalAttrs config.kyle.claude.enable workstationServers;
+  mcpServers = lib.optionalAttrs config.kyle.claude.enable workstationServers;
 
   # Claude Code refuses to PERSIST the trust decision when its cwd is exactly the
   # home directory. The accept handler branches on `os.homedir() === cwd()` and,
