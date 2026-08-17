@@ -8,6 +8,7 @@
     fastfetch
     ffmpeg
     ncdu
+    opencode
     postgresql_18
     tesseract
     typst
