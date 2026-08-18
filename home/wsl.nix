@@ -133,4 +133,10 @@
     enable = true;
     host = "artemis";
   };
+
+  # ~/.config/opencode/opencode.json pointing opencode at the ollama server in
+  # hosts/wsl.nix. Enabled HERE for the same reason as everything above, plus a
+  # specific one: artemis is the only machine with the GPU and the server, so
+  # the provider would be dead config anywhere else.
+  kyle.opencode.enable = true;
 }

@@ -24,6 +24,7 @@
     ../../home/claude.nix
     ../../home/nvim.nix
     ../../home/sync.nix
+    ../../home/opencode.nix
 
     ../../home/packages/base.nix
     ../../home/packages/dev.nix
