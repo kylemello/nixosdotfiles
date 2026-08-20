@@ -1,0 +1,34 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      # Published, not host networking. On artemis `docker` is Docker Desktop's
+      # engine, whose containers live in the docker-desktop WSL distro — host
+      # networking there joins THAT distro's namespace and cannot see anything
+      # on artemis, so :3000 would answer from nowhere. Publishing works: WSL
+      # runs networkingMode=mirrored, so this is http://localhost:3000 from both
+      # a Windows browser and artemis itself.
+      - "${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      # host.docker.internal, NOT 127.0.0.1: ollama (hosts/wsl.nix) binds
+      # artemis's loopback, which is a different namespace from this container's.
+      # Measured 2026-08-20 from a Docker Desktop container — /api/tags over
+      # host.docker.internal returned 200 while 127.0.0.1 returned nothing. This
+      # keeps the model server off the LAN and off Tailscale.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      ENABLE_OPENAI_API: "False"
+      ANONYMIZED_TELEMETRY: "False"
+      DO_NOT_TRACK: "true"
+      SCARF_NO_ANALYTICS: "true"
+    extra_hosts:
+      # Docker Desktop provides this name already; the mapping is here so the
+      # same file also works against a plain Linux dockerd.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - open_webui_data:/app/backend/data
+
+volumes:
+  open_webui_data:
+    driver: local

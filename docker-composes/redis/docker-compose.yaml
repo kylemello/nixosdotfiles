@@ -1,0 +1,16 @@
+services:
+  # The service key used to read `mysql` here — a copy-paste from the sibling
+  # mysql stack. Renamed; container_name already pinned the container itself, so
+  # nothing that talks to this depended on the old key.
+  redis:
+    image: redis:8.4-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
+    driver: local

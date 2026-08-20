@@ -25,6 +25,26 @@
     defaultUser = "kyle";
     useWindowsDriver = true;
     interop.includePath = false;
+
+    # Raise the 9p transport's max message size from WSL's 64 KB default to the
+    # 256 KB it actually caps at (asking for 1 MB just gets clamped — measured,
+    # the mount reports msize=262144). This is the single biggest cheap win
+    # available for /mnt/d, which every model in services.ollama below is read
+    # from: benchmarked 2026-08-18 on the same 4 GiB GGUF with the page cache
+    # dropped between runs, 134 MB/s at 64 KB versus 398 MB/s at 256 KB — 3x,
+    # for one mount option.
+    #
+    # It matters because ollama mmaps model weights (`load_mode = mmap` in its
+    # logs) rather than reading them sequentially, so a cold load is a long
+    # storm of demand-paged round trips and 9p latency per message dominates.
+    # Bigger messages mean proportionally fewer of them.
+    #
+    # This is automount-wide, so /mnt/c gets it too — no reason not to. NOTE it
+    # only lands at WSL boot: editing wsl.conf does nothing to already-mounted
+    # filesystems, so a full `wsl --shutdown` from Windows is required. The
+    # fileSystems."/mnt/d" entry below carries the same option so that any
+    # systemd remount (including the repair unit) uses it immediately.
+    wslConf.automount.options = "metadata,uid=1000,gid=100,msize=1048576";
   };
 
   # ---- NVIDIA GPU ---------------------------------------------------------
@@ -67,6 +87,170 @@
         /usr/lib/wsl/lib/nvidia-smi "$@"
     '')
   ];
+
+  # ---- The D: drive -------------------------------------------------------
+  # /mnt/d holds ollama's model store (services.ollama.modelsDir below), and it
+  # is the one automount that cannot be trusted to stay up: D: is an external
+  # OWC 4M2 enclosure, so it drops off the Windows side on its own (a
+  # sleep/resume, a nudged cable). When it does, the 9p channel dies for good
+  # and *silently* — the mount stays in /proc/mounts looking perfectly healthy
+  # while every access returns ENODEV. Measured 2026-08-18: `ls /mnt/d` gave
+  # "No such device" while Windows' own Get-Volume still reported D: Healthy,
+  # and ollama answered every /api/tags with a 500. WSL's automount runs once,
+  # at instance boot, so nothing repairs this short of `wsl --shutdown`.
+  #
+  # Declaring the mount here does not change how it normally gets mounted —
+  # WSL's automount still wins that race, pre-systemd, and this unit adopts
+  # whatever it finds already mounted. What the declaration buys is the *name*
+  # `mnt-d.mount`, which the repair unit and ollama's ordering below both hang
+  # off. `nofail` keeps a genuinely detached D: from holding up local-fs.target.
+  fileSystems."/mnt/d" = {
+    device = "D:";
+    fsType = "drvfs";
+    options = [ "metadata" "uid=1000" "gid=100" "nofail" "msize=1048576" ];
+    noCheck = true;
+  };
+
+  # modelsDir has to be world-writable, and was not. The ollama unit runs under
+  # DynamicUser so its uid is never kyle's, and /mnt/d is mounted with
+  # `metadata`, which makes the real mode bits enforceable instead of every
+  # file reading as 0777. Measured 2026-08-18 with the tree at 0755: serving an
+  # already-imported model worked (0755 is world-*readable*) but importing did
+  # not — `ollama cp qwen3:0.6b permtest` failed with "mkdir
+  # .../manifests/registry.ollama.ai/library/permtest: permission denied", and
+  # succeeded after a chmod. So `ollama pull` and the `ollama create` step
+  # described below were both quietly broken.
+  #
+  # `Z` is recursive because the failure is on a nested directory, not the top
+  # one, and new model imports keep creating more of them; the tree is 7
+  # directories and 10 files, so the boot-time cost over 9p is nil. It
+  # deliberately is not a `d`/`D` rule: those create what is missing, which
+  # would build this tree on the VHD root every time D: happened to be detached
+  # and then sit in the way of the real mount. `Z` only ever adjusts a path
+  # that already exists.
+  systemd.tmpfiles.rules = [
+    "Z /mnt/d/AI/ollama/models 0777 - - -"
+  ];
+
+  # systemd cannot notice a stale 9p mount on its own: mnt-d.mount stays
+  # `active (mounted)` because the mount point is still listed in mountinfo,
+  # and no amount of ordering or Restart= helps once the channel behind it is
+  # dead. Only a real I/O attempt reveals it, so it takes a timer.
+  #
+  # ollama is restarted rather than left to notice by itself. It runs with
+  # ProtectSystem=strict and ReadWritePaths=<modelsDir>, so systemd gives it a
+  # private mount namespace holding a bind mount of the models directory —
+  # confirmed in /proc/<pid>/mountinfo, which showed a separate mnt ns and the
+  # bind sharing the host mount's 9p superblock. That bind is pinned to the
+  # superblock it was made from, so a fresh mount on the host propagates in
+  # *underneath* it and the process carries on reading the dead one.
+  systemd.services.repair-mnt-d = {
+    description = "Detect and repair a stale /mnt/d drvfs mount";
+    serviceConfig.Type = "oneshot";
+    path = [ pkgs.util-linux pkgs.coreutils pkgs.systemd ];
+    script = ''
+      # No `set -e`: every failure below is handled explicitly, and a detached
+      # D: has to exit 0 or the timer logs a failure every two minutes.
+      set -u
+
+      # findmnt answers out of mountinfo, so unlike `mountpoint` it decides
+      # without touching the filesystem — which is the entire problem here.
+      mounted() { findmnt --mountpoint /mnt/d >/dev/null 2>&1; }
+
+      # `timeout`, because a half-dead 9p channel can block a stat forever.
+      readable() { timeout 20 stat -t /mnt/d/. >/dev/null 2>&1; }
+
+      # Both conditions are needed. `readable` on its own is NOT enough:
+      # with the mount gone, the bare /mnt/d directory sitting on the VHD
+      # underneath it stats perfectly well. Measured while writing this — a
+      # readable-only check called an unmounted /mnt/d healthy and exited 0
+      # without ever remounting, which is precisely the boot-time case where
+      # D: attaches late. The flip side is that this unit will remount /mnt/d
+      # within two minutes even if you unmounted it on purpose; stop the timer
+      # first if that is what you want.
+      if mounted && readable; then
+        exit 0
+      fi
+
+      if mounted; then
+        echo "/mnt/d is mounted but unreadable; detaching the stale mount"
+        systemctl stop mnt-d.mount || umount -l /mnt/d
+      fi
+
+      if ! systemctl start mnt-d.mount; then
+        echo "D: is not attached on the Windows side; leaving /mnt/d unmounted"
+        exit 0
+      fi
+
+      if ! readable; then
+        echo "remounted /mnt/d but it is still unreadable"
+        exit 1
+      fi
+
+      # `restart`, not `try-restart`: ollama Requires= the mount, so stopping
+      # it above also stopped ollama, and try-restart is a no-op on a stopped
+      # unit. This is also what recovers ollama from the failed state it lands
+      # in when D: was missing at boot.
+      echo "/mnt/d remounted; restarting ollama to drop its stale bind mount"
+      systemctl restart ollama.service
+    '';
+  };
+
+  systemd.timers.repair-mnt-d = {
+    description = "Periodically check /mnt/d for a stale drvfs mount";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "1min";
+      OnUnitActiveSec = "2min";
+      AccuracySec = "30s";
+    };
+  };
+
+  # Requires=, not just After=: with only ordering, ollama starts happily
+  # against a missing models directory and then answers every request with a
+  # 500, which is how the 2026-08-18 breakage presented. Failing to start is
+  # the louder and more honest outcome, and the repair timer above brings both
+  # units back within two minutes once D: returns.
+  systemd.services.ollama = {
+    after = [ "mnt-d.mount" ];
+    requires = [ "mnt-d.mount" ];
+
+    # Run as kyle (uid 1000) rather than under DynamicUser.
+    #
+    # /mnt/d is mounted uid=1000, so everything on it belongs to kyle no matter
+    # who wrote it — and POSIX only lets the *owner* set an explicit mtime.
+    # utimes() with concrete times is EPERM for anyone else, while the mode bits
+    # only ever grant UTIME_NOW. Measured 2026-08-18 against a 0777 file on this
+    # mount: kyle could `touch -d 2020-01-01`, `nobody` got "Operation not
+    # permitted", and a plain `touch` (= now) worked for both. No chmod can fix
+    # this, so the 0777 rule above is necessary for writes and irrelevant here.
+    #
+    # What it broke: `ollama create` refreshes the mtime of a blob that already
+    # exists, so importing any model that SHARES a layer with an installed one
+    # died on it. Measured: Qwen3.6-35B-A3B failed with `chtimes
+    # .../blobs/sha256-7cfc980a...: operation not permitted` on a 160-byte
+    # params layer it shares with kat-coder (identical qwen35moe 35B-A3B shape)
+    # — after 16 minutes of copying, and only at the very end. gemma-3, gemma-4
+    # and dolphin all imported fine because every layer of theirs was new.
+    # Verified that kyle *can* retime a blob the old DynamicUser created, so
+    # this needs no re-owning of the 123 GB already in the store.
+    #
+    # `services.ollama.user` is deliberately NOT the lever: the module would
+    # then declare users.users.kyle with isSystemUser and collide with the real
+    # account (the reason the option is left alone in services.ollama above).
+    # Overriding the unit skips that declaration. mkForce is required because
+    # the module sets DynamicUser itself.
+    #
+    # The tradeoff, accepted: this drops DynamicUser's uid isolation and gives
+    # the daemon kyle's own uid. On a single-user box whose whole job is serving
+    # kyle's models out of kyle's directory, that is a fair trade for imports
+    # that actually work.
+    serviceConfig = {
+      DynamicUser = lib.mkForce false;
+      User = "kyle";
+      Group = "users";
+    };
+  };
 
   # Local coding model on the card. ollama-cuda is NOT on cache.nixos.org —
   # nixpkgs does not redistribute binaries built against the CUDA toolkit — so
@@ -127,6 +311,39 @@
       OLLAMA_KEEP_ALIVE = "-1";
     };
   };
+
+  # ---- Open WebUI ---------------------------------------------------------
+  # Not here. It is a compose stack, ~/docker-composes/open-webui, managed as a
+  # file by home/docker-composes.nix and started by hand like the dev databases
+  # next to it.
+  #
+  # It was a virtualisation.oci-containers container until 2026-08-20 and that
+  # could not work on this host, for two reasons worth keeping:
+  #
+  #   * The module's default log driver is journald, and this dockerd rejects it
+  #     ("journald is not enabled on this host" at container create). nixpkgs'
+  #     moby carries the stub driver, so `docker info` advertises journald while
+  #     nothing can initialize it — no daemon.json entry turns it on. The unit
+  #     sat in start-limit-hit from its first start.
+  #
+  #   * `docker` in this distro is not artemis's dockerd. Docker Desktop's WSL
+  #     integration re-binds /var/run/docker.sock (= /run/docker.sock) to a proxy
+  #     into its own VM, replacing the file systemd's docker.socket created;
+  #     artemis's dockerd keeps listening on the now-unlinked inode, running and
+  #     unreachable by path. So the unit's container was created in the
+  #     docker-desktop distro — /etc/hostname `docker-desktop`, `--network=host`
+  #     joining that distro's namespace — where it could reach neither ollama on
+  #     artemis's loopback (curl to 127.0.0.1:11434 from inside: no answer) nor
+  #     a browser on :3000, from Windows or from here.
+  #
+  # The compose stack sidesteps both: Docker Desktop's engine is the one being
+  # asked, ports are published rather than shared, and ollama is reached at
+  # host.docker.internal:11434 — which means OLLAMA_HOST above stays on
+  # loopback and 11434 stays off the LAN and off Tailscale.
+  #
+  # The old container's SQLite lives in /var/lib/open-webui (root-owned, written
+  # through Docker Desktop's file sharing). It was copied into the stack's
+  # named volume on 2026-08-20; the directory is left in place, unmanaged.
 
   # ---- SSH into the WSL instance ------------------------------------------
   # WSL runs with `networkingMode=mirrored` (set Windows-side in

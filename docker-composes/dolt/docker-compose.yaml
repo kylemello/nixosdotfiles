@@ -1,0 +1,19 @@
+services:
+  dolt:
+    image: dolthub/dolt-sql-server:latest
+    container_name: dolt-dev
+    restart: unless-stopped
+    ports:
+      - "${DOLT_PORT:-3306}:3306"
+    environment:
+      DOLT_ROOT_PASSWORD: ${DOLT_ROOT_PASSWORD:-rootpassword}
+      DOLT_ROOT_HOST: "%"
+      DOLT_DATABASE: ${DOLT_DATABASE:-DocResolve}
+      DOLT_USER: ${DOLT_USER:-devuser}
+      DOLT_PASSWORD: ${DOLT_PASSWORD:-devpassword}
+    volumes:
+      - dolt-data:/var/lib/dolt
+
+volumes:
+  dolt-data:
+    driver: local

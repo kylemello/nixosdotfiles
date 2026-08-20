@@ -1,2 +1,5 @@
 # SDD scratch workspaces (ledgers, briefs, review packages)
 .superpowers/
+
+# Per-stack compose credentials (see home/docker-composes.nix)
+docker-composes/**/.env
