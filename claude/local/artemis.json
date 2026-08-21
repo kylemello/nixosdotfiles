@@ -11,6 +11,9 @@
     },
     "kmello-dev": {
       "source": { "source": "directory", "path": "/home/kyle/work/claude-plugins" }
+    },
+    "mycare": {
+      "source": { "source": "directory", "path": "/home/kyle/work/mycaredev.claudeskills" }
     }
   }
 }

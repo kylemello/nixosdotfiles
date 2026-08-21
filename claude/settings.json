@@ -48,9 +48,17 @@
     "work-os@kmello-dev": true,
     "skill-creator@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
-    "pr-review-toolkit@claude-plugins-official": true
+    "pr-review-toolkit@claude-plugins-official": true,
+    "mattpocock-skills@mattpocock": true,
+    "mycare-tools@mycare": false
   },
   "extraKnownMarketplaces": {
+    "mattpocock": {
+      "source": {
+        "source": "github",
+        "repo": "mattpocock/skills"
+      }
+    },
     "kmello": {
       "source": {
         "source": "directory",

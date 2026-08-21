@@ -46,6 +46,21 @@ in
       # target writable — a plain home.file source would be a read-only store
       # path, and Claude Code needs to write settings.json for /config,
       # /plugin and "always allow" to work.
+      #
+      # That writability has a limit, found 2026-08-20: the link is a DOUBLE hop
+      # (~/.claude/x -> /nix/store/...-home-manager-files/x -> this repo), so
+      # anything that writes via write-then-rename creates its temp file next to
+      # the STORE entry and dies with EROFS. The TUI writes in place and is fine;
+      # the `claude plugin` CLI does not, so `claude plugin install` and
+      # `claude plugin marketplace add` both fail here. Use /plugin in the TUI,
+      # or edit claude/settings.json and claude/local/<host>.json by hand.
+      #
+      # Directory-source marketplaces in claude/local/<host>.json need their repo
+      # CLONED on each machine — nothing here clones them, and a missing path is
+      # a silently absent marketplace rather than an error. Each one's `path` is
+      # the clone it expects; `git pull` in that clone is how it updates. A
+      # marketplace whose plugins are disabled in settings.json still needs its
+      # clone present, since the path is resolved either way.
       repo = "${config.home.homeDirectory}/nixosdotfiles/claude";
       link = p: config.lib.file.mkOutOfStoreSymlink "${repo}/${p}";
     in
