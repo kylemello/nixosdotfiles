@@ -2,271 +2,382 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run Qwen3-Coder-30B-A3B and Muse Glimmer 30B entirely on ariane via Ollama's MLX engine, driven by OpenCode, with llama.cpp retained for prompts past 60K tokens.
+> **REVISION 2, 2026-08-24.** Revision 1 targeted Ollama's MLX engine and failed at Task 1: nixpkgs builds MLX with `-DMLX_BUILD_METAL:BOOL=FALSE` and Ollama with `OLLAMA_MLX_BACKENDS=""`, so neither can reach Metal. See the Amendment section of the spec. This revision uses Apple's PyPI MLX wheels in a `uv` venv, with `vllm-mlx` as the server. **Ollama is dropped.**
 
-**Architecture:** A new Home Manager module `home/llm.nix` installs Ollama and an MLX Python environment, pins loopback-only environment variables, and exposes an `llm` shell command for on-demand model serving. OpenCode gets a declarative local-provider config with every cloud provider absent. A separately-pinned nixpkgs input supplies a `llama-cpp` new enough to load Muse Glimmer.
+**Goal:** Run Qwen3-Coder-30B-A3B and Muse Glimmer 30B on ariane's GPU through `vllm-mlx`, driven by OpenCode, with llama.cpp retained as a long-context escape hatch.
 
-**Tech Stack:** Nix flakes + standalone Home Manager, Ollama 0.32.6 (MLX backend), `python3Packages.mlx` 0.32.0 / `mlx-lm` 0.31.3, llama.cpp ≥ b10353, OpenCode 1.18.x, fish.
+**Architecture:** A `uv`-managed virtualenv at `~/.local/share/mlx-venv` supplies Metal-enabled `mlx`, `mlx-metal`, `mlx-lm`, and `vllm-mlx` from PyPI. Its contents are pinned by a lockfile committed to the repo, so the *specification* stays declarative even though the venv is materialized imperatively. A Home Manager module `home/llm.nix` provides `uv`, the lockfile, and an `llm` command that builds the venv and drives the server on demand.
+
+**Tech Stack:** Nix flakes + standalone Home Manager, `uv` 0.12.3, MLX 0.32.1 + mlx-metal 0.32.1 (PyPI), mlx-lm 0.31.3, vllm-mlx 0.4.1, llama.cpp ≥ b10353, OpenCode 1.18.x, fish.
 
 ## Global Constraints
 
-Every task's requirements implicitly include this section. Values are copied verbatim from `docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md`.
+Every task's requirements implicitly include this section.
 
-- **Bind loopback only (`127.0.0.1`). Never `0.0.0.0`.** Applies to every server started by any task.
-- **`OLLAMA_HOST=127.0.0.1` set explicitly in the module, not relied on as default.**
-- **The OpenCode local profile carries zero cloud providers.**
-- **`"share": "disabled"` in the OpenCode config.**
-- **`llama-cpp` must be ≥ b10353.** Pinned nixpkgs currently supplies b10273; unstable HEAD supplies b10408.
-- **`iogpu.wired_limit_mb=40960`** — needs `sudo`, does not survive reboot, cannot be Home Manager–managed. Documented, never scripted into activation.
-- **On-demand only. No launchd agent.** A ~19 GB permanent reservation on 48 GB is out of scope.
-- **Model weights live outside the Nix store** (Ollama's `~/.ollama`, MLX's `~/.cache/huggingface`).
-- **The repo working tree is dirty with pre-existing unrelated changes** (`claude/local/ariane.json`, `claude/settings.json`, `nvim/lazy-lock.json`, `flake.lock`). Every commit in this plan stages explicit paths. Never `git add -A`, never `git commit -a`.
-- **Every speed number in the spec is third-party.** No task may cite a spec figure as an observed result.
-- **New files must be `git add`ed before any `nix` eval or switch reads them.** Per `CLAUDE.md`: flakes only see git-tracked files. This bites `home/llm.nix` in Task 1.
-- **The coding model's tag is resolved once, in Task 2 Step 1.** The plan writes `qwen3-coder:30b` as a placeholder in Tasks 2, 4, and 5. If Step 1 resolves a different tag, update all three — `tests/llm.test.sh`, the `coderModel` binding in `home/llm.nix`, and the OpenCode `models` key — or the test and the config will disagree silently.
-- **This repo is public** (`github.com/kylemello/nixosdotfiles`). Nothing in this plan is credential-shaped, but `docs/local-llm.md` and the benchmark output are world-readable once pushed. Don't paste work data or internal URLs into the measurement notes.
+- **Bind loopback only (`127.0.0.1`). Never `0.0.0.0`.** vllm-mlx takes `--host`; it defaults to something else, so pass it explicitly every time.
+- **Serve with `--api-key`.** vllm-mlx prints `SECURITY WARNING: Server running without API key authentication` when it is omitted. The key is generated locally, stored at `~/.config/mlx/api-key` with mode 0600, and **never committed** — the repo is public.
+- **Pass `--offline` once models are downloaded.** PHI use case: the server must not reach the network during inference.
+- **The OpenCode local profile carries zero cloud providers**, and `"share": "disabled"`.
+- **`llama-cpp` must be ≥ b10353.** Pinned nixpkgs supplies b10273; unstable HEAD supplied b10408 on 2026-08-24.
+- **`iogpu.wired_limit_mb=40960`** — needs `sudo`, does not survive reboot, cannot be Home Manager–managed. Documented, never scripted into activation. Measured ceiling without it: **37.4 GiB** max recommended working set, reported by `mx.device_info()`.
+- **On-demand only. No launchd agent.**
+- **Model weights and the venv live outside the Nix store** — `~/.cache/huggingface` and `~/.local/share/mlx-venv`.
+- **The working tree has pre-existing unrelated changes**: `claude/local/ariane.json`, `claude/settings.json`, `nvim/lazy-lock.json`, and a deliberately-staged `flake.lock` input bump. Stage explicit paths. **Never `git add -A`, never `git commit -a`.**
+- **New files must be `git add`ed before any `nix` eval or switch reads them.** Per `CLAUDE.md`: flakes only see git-tracked files.
+- **This repo is PUBLIC** (`github.com/kylemello/nixosdotfiles`).
+- **Repo convention:** use `writeShellScriptBin`, never `writeShellApplication` (it pulls shellcheck, a heavy uncached Haskell build).
+- **Every speed number in the spec is third-party.** No task may cite one as an observed result.
 
-**Switch command, used throughout:**
+**Commands used throughout:**
 
 ```bash
-cd ~/nixosdotfiles && home-manager switch --flake .#ariane -b backup
+cd ~/nixosdotfiles
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+home-manager switch --flake .#ariane -b backup
 ```
+
+## Verified environment facts — do not re-derive
+
+Measured on ariane 2026-08-24. Trust these; re-deriving them wastes a task.
+
+- PyPI MLX **works on Metal**: `default_device: Device(gpu, 0)`, `metal available: True`, `device: Apple M4 Pro`, `max recommended working set: 37.4 GiB`, `memory size: 48.0 GiB`.
+- `mlx-metal` is a **separate wheel** from `mlx`. Installing `mlx` alone on macOS pulls it, but pin both.
+- `uv` 0.12.3 is already on PATH from `~/.nix-profile`.
+- Resolved wheel versions: `mlx` 0.32.1, `mlx-metal` 0.32.1, `mlx-lm` 0.31.3, `vllm-mlx` 0.4.1. `vllm-mlx` also pulls `mlx-vlm` 0.6.15, `mlx-audio` 0.5.0, `mlx-embeddings` 0.1.0.
+- A full venv with all of the above is **~1.3 GB**.
+- `vllm-mlx serve` works, binds `127.0.0.1`, and was ready in **~26 s** on a 1B model.
+- Routes confirmed live: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, **`/v1/messages` (Anthropic, HTTP 200)**, `/v1/cache/stats`, `/v1/cache/prefix`, `/v1/mcp/{tools,servers,execute}`, `/v1/embeddings`, `/v1/rerank`, `/health`, `/metrics`.
+- `/v1/cache/stats` returns real counters: `hits`, `misses`, `stores`, `evictions`, `hit_ratio`.
+- `--tool-call-parser` accepts: `auto, mistral, qwen, qwen3_coder, llama, hermes, harmony, gpt-oss, deepseek, kimi, granite, nemotron, xlam, functionary, gemma4, glm47, minimax`. **There is no `muse` parser** — Muse Glimmer must use `auto` or fail.
+- Ollama and the CPU-only nixpkgs `mlx` are **currently installed** by Home Manager generation 28 from the failed Revision 1. Task 1 removes them.
 
 ---
 
-### Task 1: MLX and Ollama installed, MLX proven to be on the GPU
+### Task 1: Metal-capable MLX venv, pinned and proven on the GPU
 
-The foundation. Nothing later is meaningful if MLX silently falls back to CPU.
+Replaces Revision 1's Task 1 entirely. The staged-but-uncommitted `home/llm.nix` and `tests/llm.test.sh` from that attempt are **wrong for this design** — overwrite them.
 
 **Files:**
-- Create: `home/llm.nix`
-- Create: `tests/llm.test.sh`
-- Modify: `users/kyle/ariane.nix` (imports list, after `../../home/k9s.nix`)
+- Overwrite: `home/llm.nix` (currently staged with the dead Ollama design)
+- Overwrite: `tests/llm.test.sh` (same)
+- Create: `home/llm-requirements.in`
+- Create: `home/llm-requirements.txt` (generated, committed)
+- Already modified: `users/kyle/ariane.nix` (the `../../home/llm.nix` import is already in place from Revision 1 — verify, don't duplicate)
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `pkgs`-provided binaries on PATH — `ollama`, `mlx_lm.generate`, `mlx_lm.server`, `mlx_lm.convert`, and a `python` with `mlx` importable. Environment variables `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_FLASH_ATTENTION`. Test harness functions `ok`, `bad`, `check`, `have` in `tests/llm.test.sh`.
+- Produces: venv at `~/.local/share/mlx-venv` with `bin/python`, `bin/mlx_lm.generate`, `bin/vllm-mlx`. An `llm` command on PATH whose only implemented subcommand this task is `llm sync`. Test helpers `ok`, `bad`, `check`, `have` and the variable `VENV=$HOME/.local/share/mlx-venv` in `tests/llm.test.sh`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the pinned requirements input**
 
-Create `tests/llm.test.sh`. It mirrors the helper style of `tests/wip.test.sh` (same `ok`/`bad`/`check` shape) so the two read alike.
+Create `home/llm-requirements.in`:
+
+```
+# Top-level pins for the MLX stack. Compiled to llm-requirements.txt by
+# `uv pip compile` (see home/llm.nix, `llm lock`).
+#
+# These come from PyPI, NOT nixpkgs, and that is the whole point: nixpkgs
+# builds mlx with -DMLX_BUILD_METAL:BOOL=FALSE because Nix's sandbox cannot
+# reach Apple's closed-source `metal` compiler, so the nixpkgs build is
+# CPU-only. `mlx-metal` is a separate wheel and is the piece that carries the
+# Metal backend -- pinned explicitly rather than left to transitive resolution.
+mlx==0.32.1
+mlx-metal==0.32.1
+mlx-lm==0.31.3
+vllm-mlx==0.4.1
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Overwrite `tests/llm.test.sh`:
 
 ```bash
 #!/usr/bin/env bash
 # Verification suite for the local LLM stack (home/llm.nix).
 #   bash tests/llm.test.sh
-# Unlike tests/wip.test.sh this needs no `nix shell` wrapper -- every binary it
-# probes is expected to be on PATH via home-manager, and that expectation is
-# itself part of what is under test.
+# Mirrors the ok/bad/check helper style of tests/wip.test.sh.
 set -uo pipefail
 
+VENV="$HOME/.local/share/mlx-venv"
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()   { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 check() { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected [$3] got [$2]"; }
 have()  { command -v "$1" >/dev/null 2>&1 && ok "$1 on PATH" || bad "$1 on PATH" "not found"; }
 
-echo "== Task 1: toolchain =="
-have ollama
-have mlx_lm.generate
-have mlx_lm.server
+echo "== Task 1: MLX venv on Metal =="
+have uv
+have llm
 
-# Resolve the interpreter from the MLX env itself, NOT from a bare `python`
-# on PATH. There is no bare `python` on this machine, `python3` is Homebrew's
-# /opt/homebrew/bin/python3 (no mlx), and whether the nix profile wins depends
-# on PATH ordering. Deriving it from a console script the env owns is exact.
-MLX_PY="$(dirname "$(command -v mlx_lm.generate 2>/dev/null || echo /nonexistent/x)")/python"
-if [ -x "$MLX_PY" ]; then
-  ok "mlx env python resolved ($MLX_PY)"
-else
-  bad "mlx env python resolved" "no python next to mlx_lm.generate"
-fi
+# Ollama and the CPU-only nixpkgs mlx were installed by the failed Revision 1
+# and must be gone -- leaving them means two engines competing for 48 GB and a
+# CPU-only `mlx` shadowing the real one depending on PATH order.
+command -v ollama >/dev/null 2>&1 \
+  && bad "ollama removed" "still on PATH at $(command -v ollama)" \
+  || ok "ollama removed"
 
-# MLX must resolve to the GPU. A CPU fallback here would make every
-# benchmark in later tasks meaningless while still "working".
-MLX_DEV="$("$MLX_PY" -c 'import mlx.core as mx; print(mx.default_device())' 2>&1 | tail -1)"
-check "mlx default device is gpu" "$MLX_DEV" "Device(gpu, 0)"
+for b in python mlx_lm.generate vllm-mlx; do
+  [ -x "$VENV/bin/$b" ] && ok "venv has $b" || bad "venv has $b" "missing from $VENV/bin"
+done
 
-# A real matmul on the GPU, not just a device query. 2048x2048 normal matrix
-# squared and summed -- we assert only that it produces a finite float, since
-# the value is random.
-MLX_MM="$("$MLX_PY" -c '
+# The assertion this whole design turns on. Revision 1 died here with
+# Device(cpu, 0) because nixpkgs strips the Metal backend.
+if [ -x "$VENV/bin/python" ]; then
+  MLX_DEV="$("$VENV/bin/python" -c 'import mlx.core as mx; print(mx.default_device())' 2>&1 | tail -1)"
+  check "mlx default device is gpu" "$MLX_DEV" "Device(gpu, 0)"
+
+  MLX_METAL="$("$VENV/bin/python" -c 'import mlx.core as mx; print(mx.metal.is_available())' 2>&1 | tail -1)"
+  check "mlx metal available" "$MLX_METAL" "True"
+
+  # Real GPU work, not just a capability query.
+  MLX_MM="$("$VENV/bin/python" -c '
 import mlx.core as mx, math
 a = mx.random.normal((2048, 2048))
+mx.eval(a)
 s = float((a @ a).sum())
 print("finite" if math.isfinite(s) else "nonfinite")
 ' 2>&1 | tail -1)"
-check "mlx gpu matmul returns finite" "$MLX_MM" "finite"
-
-check "OLLAMA_HOST is loopback" "${OLLAMA_HOST:-unset}" "127.0.0.1:11434"
+  check "mlx gpu matmul returns finite" "$MLX_MM" "finite"
+else
+  bad "mlx default device is gpu" "no venv python"
+  bad "mlx metal available" "no venv python"
+  bad "mlx gpu matmul returns finite" "no venv python"
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
 ```
 
-- [ ] **Step 2: Run it to make sure it fails**
+- [ ] **Step 3: Run it to make sure it fails**
 
 ```bash
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: FAIL on every check — `ollama on PATH: not found`, `mlx_lm.generate on PATH: not found`, `mlx env python resolved: no python next to mlx_lm.generate`, the two MLX checks failing because `$MLX_PY` does not exist, and `OLLAMA_HOST` `unset`.
+Expected: `uv on PATH` passes (uv is already installed). `ollama removed` FAILS — it is still on PATH from generation 28. `llm on PATH` FAILS. All three venv-binary checks FAIL. All three MLX checks FAIL with `no venv python`.
 
-- [ ] **Step 3: Write `home/llm.nix`**
+- [ ] **Step 4: Overwrite `home/llm.nix`**
 
 ```nix
 { config, lib, pkgs, ... }:
 
-# Local LLM stack for ariane -- Ollama on its MLX backend, plus a Python
-# environment with MLX itself for benchmarking and quantizing.
+# Local LLM stack for ariane -- Metal-enabled MLX from PyPI, served by
+# vllm-mlx.
 #
-# Ollama rather than raw `mlx_lm.server` for one reason: snapshot caching.
-# Agent loops resend the whole transcript on every tool call, so the model
-# reprocesses the same context dozens of times per task. Ollama's MLX engine
-# stores reusable state at checkpoints and processes only the delta;
-# mlx_lm.server has no equivalent, and without it MLX's long-context weakness
-# (~50% of llama.cpp+flash-attention past ~60K prompt tokens) lands squarely
-# on the agentic use case. mlx-lm is still installed below, but as a
-# measurement side channel, not in the agent path.
+# WHY NOT NIXPKGS: nixpkgs builds python3Packages.mlx with
+# -DMLX_BUILD_METAL:BOOL=FALSE, because Nix's build sandbox cannot reach
+# Apple's closed-source `metal` compiler. The result imports fine and reports
+# Device(cpu, 0) -- it works, silently, on the wrong processor. nixpkgs'
+# `ollama` is built with OLLAMA_MLX_BACKENDS="" for the same reason and ships
+# only llama-server in $out/lib/ollama. Neither can do MLX on Metal. Apple's
+# PyPI wheels can, and `mlx-metal` is the separate wheel that carries it.
 #
-# Darwin-only by construction: MLX is Metal. The `lib.optionals` guard keeps
-# this module inert if it is ever imported from a Linux profile.
+# THE TRADEOFF: this leaves pure Nix. The venv is materialized by uv and will
+# not rebuild from the flake. What stays declarative is the specification --
+# llm-requirements.txt is compiled, committed, and `llm sync` reproduces the
+# venv from it exactly. `llm doctor` reports drift between the two.
+#
+# Darwin-only by construction: MLX is Metal.
 let
-  # Both the console scripts (mlx_lm.generate, mlx_lm.server, mlx_lm.convert)
-  # and an importable `mlx` for the GPU checks in tests/llm.test.sh. A bare
-  # `python3Packages.mlx-lm` in home.packages would give the scripts but leave
-  # `python -c 'import mlx.core'` broken, which is exactly what the test asserts.
-  mlxPython = pkgs.python3.withPackages (ps: with ps; [
-    mlx
-    mlx-lm
-  ]);
+  venv = "$HOME/.local/share/mlx-venv";
+  reqIn = ./llm-requirements.in;
+  reqLock = ./llm-requirements.txt;
+
+  llm = pkgs.writeShellScriptBin "llm" ''
+    set -euo pipefail
+    export PATH="${lib.makeBinPath (with pkgs; [ uv curl coreutils jq gnugrep ])}:$PATH"
+
+    VENV="${venv}"
+    LOCK=${reqLock}
+    REQ_IN=${reqIn}
+
+    sync_venv() {
+      if [ ! -x "$VENV/bin/python" ]; then
+        echo "creating venv at $VENV" >&2
+        mkdir -p "$(dirname "$VENV")"
+        uv venv --python 3.12 "$VENV"
+      fi
+      echo "syncing from $LOCK" >&2
+      VIRTUAL_ENV="$VENV" uv pip sync --python "$VENV/bin/python" "$LOCK"
+      echo "venv ready" >&2
+    }
+
+    case "''${1-}" in
+      sync) sync_venv ;;
+      lock)
+        # Recompile the lock from the .in file. Writes to the repo, so it
+        # deliberately requires being run from a checkout.
+        out="''${2-}"
+        if [ -z "$out" ]; then
+          echo "usage: llm lock <path-to-llm-requirements.txt>" >&2
+          echo "  e.g. llm lock ~/nixosdotfiles/home/llm-requirements.txt" >&2
+          exit 1
+        fi
+        uv pip compile --python-version 3.12 "$REQ_IN" -o "$out"
+        ;;
+      doctor)
+        if [ ! -x "$VENV/bin/python" ]; then
+          echo "venv missing -- run: llm sync" >&2
+          exit 1
+        fi
+        echo "venv:   $VENV"
+        echo "python: $("$VENV/bin/python" --version 2>&1)"
+        "$VENV/bin/python" - <<'PY'
+import mlx.core as mx
+print("device:", mx.default_device())
+print("metal: ", mx.metal.is_available())
+info = mx.device_info()
+print("gpu:   ", info.get("device_name"))
+print("budget:", round(info.get("max_recommended_working_set_size", 0) / 2**30, 1), "GiB")
+PY
+        ;;
+      *)
+        cat >&2 <<'USAGE'
+    usage: llm <command>
+
+      sync     build/update the MLX venv from the committed lockfile
+      lock     recompile the lockfile from llm-requirements.in
+      doctor   report venv health and whether MLX has the GPU
+    USAGE
+        exit 1
+        ;;
+    esac
+  '';
 in
 {
+  # uv is the only thing Nix installs for the MLX side. Everything else lives
+  # in the venv, by design -- see the header comment.
   home.packages = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-    pkgs.ollama
-    mlxPython
+    pkgs.uv
+    llm
   ];
-
-  home.sessionVariables = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin {
-    # Loopback, explicitly. Ollama's own default is already localhost, but this
-    # is the single control that keeps PHI-bearing prompts off the network, so
-    # it is pinned rather than inherited. Any change here needs the lsof audit
-    # in tests/llm.test.sh re-run.
-    OLLAMA_HOST = "127.0.0.1:11434";
-
-    # Ollama's historical default context is 4096 tokens and it truncates
-    # SILENTLY past that -- an agent transcript would lose its head mid-task
-    # with no error surfaced anywhere. 32768 is chosen to sit under the ~60K
-    # point where MLX's long-context penalty bites; `llm long` (Task 6) is the
-    # path for anything bigger.
-    OLLAMA_CONTEXT_LENGTH = "32768";
-
-    OLLAMA_FLASH_ATTENTION = "1";
-  };
 }
 ```
 
-- [ ] **Step 4: Import it from the ariane profile**
+Note what is **absent**: no `pkgs.ollama`, no `pkgs.python3Packages.mlx*`. Removing them is the point — the test asserts `ollama` is gone.
 
-In `users/kyle/ariane.nix`, add to the `imports` list immediately after `../../home/k9s.nix`:
+- [ ] **Step 5: Verify the import already exists**
 
-```nix
-    ../../home/llm.nix
+Revision 1 already added `../../home/llm.nix` to the `imports` list in `users/kyle/ariane.nix`. Confirm it is there exactly once:
+
+```bash
+grep -c 'home/llm.nix' ~/nixosdotfiles/users/kyle/ariane.nix
 ```
 
-- [ ] **Step 5: Stage the new files, then dry-check, then apply**
+Expected: `1`. If `0`, add it after `../../home/k9s.nix`. If `2`, remove the duplicate.
 
-**Staging is not optional and not a tidiness step.** Per `CLAUDE.md`: *"Flakes only see git-tracked files. After creating any new file the build reads, `git add` it or `nix` eval/build won't find it."* `home/llm.nix` is brand new, so without this the switch fails with a `path does not exist` error on a file that is plainly sitting on disk.
+- [ ] **Step 6: Generate the lockfile**
 
-Stage explicit paths only — the tree has pre-existing unrelated changes.
+`uv` is already on PATH, so the lock can be compiled before the switch.
 
 ```bash
 cd ~/nixosdotfiles
-git add home/llm.nix tests/llm.test.sh users/kyle/ariane.nix
-
-# Repo convention (CLAUDE.md, "Common commands"): evaluate to a derivation
-# path first. Catches syntax and option errors in seconds without building.
-nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
-
-home-manager switch --flake .#ariane -b backup
-exec fish -l
+uv pip compile --python-version 3.12 home/llm-requirements.in -o home/llm-requirements.txt
+head -20 home/llm-requirements.txt
+grep -E '^(mlx|mlx-metal|mlx-lm|vllm-mlx)==' home/llm-requirements.txt
 ```
 
-`exec fish -l` is required — `home.sessionVariables` lands in `hm-session-vars.sh`, which an already-running shell has not sourced, so `OLLAMA_HOST` would still read `unset`.
+Expected: the four pins appear at the versions in `home/llm-requirements.in`. If `uv pip compile` resolves a different version for any of them, stop — the pins are exact and a mismatch means PyPI moved.
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [ ] **Step 7: Stage, dry-check, and apply**
+
+Staging first is mandatory — flakes only see git-tracked files, and three of these are new.
+
+```bash
+cd ~/nixosdotfiles
+git add home/llm.nix home/llm-requirements.in home/llm-requirements.txt tests/llm.test.sh users/kyle/ariane.nix
+nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
+home-manager switch --flake .#ariane -b backup
+```
+
+This switch **removes** ollama and the CPU-only mlx from the profile.
+
+- [ ] **Step 8: Build the venv**
+
+```bash
+llm sync
+llm doctor
+```
+
+`llm sync` downloads ~1.3 GB of wheels. `llm doctor` must report `device: Device(gpu, 0)` and `metal: True`.
+
+- [ ] **Step 9: Run the test to verify it passes**
 
 ```bash
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `7 passed, 0 failed`.
+Expected: `9 passed, 0 failed`.
 
-If `mlx default device is gpu` reports `Device(cpu, 0)`, stop and do not proceed to Task 2 — every later benchmark would be measuring the wrong thing. Check that `xcrun -f metal` still resolves and that the process is not running under Rosetta (`sysctl -n sysctl.proc_translated` must print `0`).
+If `mlx default device is gpu` reports `Device(cpu, 0)`, **stop and report** — that is Revision 1's failure recurring and it invalidates every later task. Check that `mlx-metal` actually installed: `"$HOME/.local/share/mlx-venv/bin/python" -m pip list | grep mlx`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 cd ~/nixosdotfiles
-# Already staged in Step 5 (the flake could not have seen home/llm.nix
-# otherwise). Re-stated so the paths are explicit and re-running is safe.
-git add home/llm.nix tests/llm.test.sh users/kyle/ariane.nix
-git status --short   # confirm ONLY these three are staged
-git commit -m "Add local LLM stack: Ollama MLX engine + mlx-lm on ariane"
+git add home/llm.nix home/llm-requirements.in home/llm-requirements.txt tests/llm.test.sh users/kyle/ariane.nix
+git status --short   # confirm ONLY these five are staged, plus the pre-existing flake.lock
+git commit -m "Local LLM: Metal-enabled MLX via uv venv, replacing nixpkgs mlx+ollama" \
+  -- home/llm.nix home/llm-requirements.in home/llm-requirements.txt tests/llm.test.sh users/kyle/ariane.nix
 ```
+
+The explicit `--` pathspec keeps the staged `flake.lock` bump out of this commit.
 
 ---
 
-### Task 2: Models pulled, tags confirmed, short-context baseline measured
+### Task 2: Model repos resolved and downloaded
 
 **Files:**
 - Modify: `tests/llm.test.sh` (append a Task 2 section)
 - Create: `docs/local-llm.md`
 
 **Interfaces:**
-- Consumes: `ollama` on PATH and `OLLAMA_HOST` from Task 1.
-- Produces: two pulled Ollama models, referenced by exact tag in every later task. The agentic tag is **`muse-glimmer:30b-mlx`** (verified to exist in the Ollama library). The coding tag is **not yet verified** and is resolved in Step 1 below; later tasks refer to it as the value recorded in `docs/local-llm.md` under "Resolved model tags".
+- Consumes: the venv from Task 1.
+- Produces: two models in `~/.cache/huggingface`, referenced by exact repo id in every later task. Both ids are **unverified** and resolved in Step 1.
 
-- [ ] **Step 1: Resolve the coding model's real Ollama tag**
+- [ ] **Step 1: Resolve the real HuggingFace repo ids**
 
-`muse-glimmer:30b-mlx` is confirmed present in the Ollama library. The Qwen3-Coder MLX tag was **not** confirmed during design and must not be guessed.
+Neither id was confirmed during planning. Do not guess — query the Hub.
 
 ```bash
-ollama serve &>/tmp/ollama-serve.log &
-sleep 3
-# Ollama has no `search` subcommand; the library is queried over HTTP.
-curl -s "https://ollama.com/library/qwen3-coder/tags" | grep -oE 'qwen3-coder:[0-9a-zA-Z._-]+' | sort -u
+VENV=$HOME/.local/share/mlx-venv
+# Coding model: an MLX 4-bit conversion of Qwen3-Coder-30B-A3B
+curl -s "https://huggingface.co/api/models?search=Qwen3-Coder-30B-A3B&limit=50" \
+  | jq -r '.[].id' | grep -iE 'mlx|4bit' | head -20
+echo "---"
+# Agentic model: an MLX conversion of Muse Glimmer 30B
+curl -s "https://huggingface.co/api/models?search=Muse-Glimmer&limit=50" \
+  | jq -r '.[].id' | grep -iE 'mlx' | head -20
 ```
 
-Record the exact tag matching a 30B A3B MLX build. If no `-mlx` variant exists, use the plain `qwen3-coder:30b` tag — on Ollama 0.32.6 the MLX engine is the backend for all Apple Silicon inference, so a non-`-mlx` tag still runs through MLX; the suffix marks a purpose-built conversion, not the only MLX path.
+Prefer `mlx-community/*` where it exists — it is the canonical MLX conversion org. Design research saw `RadixArk/Muse-Glimmer-q4-MLX` and `RadixArk/Muse-Glimmer-q4km-gs128-MLX`; confirm before use. Pick 4-bit for both: at ~17–19 GB each they fit the 37.4 GiB budget one at a time.
+
+Record both ids. They are referred to below as `$CODER_REPO` and `$AGENT_REPO`.
 
 - [ ] **Step 2: Write the failing test**
 
-Append to `tests/llm.test.sh`, before the final `printf`. Replace `qwen3-coder:30b` with the tag resolved in Step 1 if it differs.
+Append to `tests/llm.test.sh`, before the final `printf`. Substitute the ids resolved in Step 1.
 
 ```bash
 echo
 echo "== Task 2: models =="
 
-AGENT_MODEL="muse-glimmer:30b-mlx"
-CODER_MODEL="qwen3-coder:30b"
+CODER_REPO="mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+AGENT_REPO="RadixArk/Muse-Glimmer-q4-MLX"
 
-MODELS="$(ollama list 2>/dev/null)"
-case "$MODELS" in
-  *"$AGENT_MODEL"*) ok "agent model pulled ($AGENT_MODEL)" ;;
-  *) bad "agent model pulled ($AGENT_MODEL)" "not in \`ollama list\`" ;;
-esac
-case "$MODELS" in
-  *"$CODER_MODEL"*) ok "coder model pulled ($CODER_MODEL)" ;;
-  *) bad "coder model pulled ($CODER_MODEL)" "not in \`ollama list\`" ;;
-esac
+# HF caches as models--<org>--<name>. Presence of a snapshot dir with a
+# safetensors file is the real test; a bare directory can exist from a failed
+# partial download.
+hf_cached() {
+  local repo="$1" dir
+  dir="$HOME/.cache/huggingface/hub/models--${repo//\//--}"
+  [ -d "$dir" ] && [ -n "$(find "$dir" -name '*.safetensors' -print -quit 2>/dev/null)" ]
+}
 
-# The API answers, and answers on loopback.
-API="$(curl -s --max-time 10 http://127.0.0.1:11434/v1/models)"
-case "$API" in
-  *"$AGENT_MODEL"*) ok "/v1/models lists the agent model" ;;
-  *) bad "/v1/models lists the agent model" "got: ${API:0:200}" ;;
-esac
+hf_cached "$CODER_REPO" && ok "coder model cached ($CODER_REPO)" \
+  || bad "coder model cached ($CODER_REPO)" "no safetensors under ~/.cache/huggingface"
+hf_cached "$AGENT_REPO" && ok "agent model cached ($AGENT_REPO)" \
+  || bad "agent model cached ($AGENT_REPO)" "no safetensors under ~/.cache/huggingface"
 ```
 
 - [ ] **Step 3: Run it to verify the new section fails**
@@ -275,16 +386,17 @@ esac
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: Task 1's five checks still pass; the three new checks FAIL with `not in \`ollama list\``.
+Expected: Task 1's nine checks still pass; the two new checks FAIL.
 
-- [ ] **Step 4: Pull both models**
+- [ ] **Step 4: Download both models**
 
-~36 GB total against 269 GB free. This takes a while on a normal connection.
+~36 GB total against 269 GB free. `vllm-mlx download` handles this without starting a server.
 
 ```bash
-ollama pull muse-glimmer:30b-mlx
-ollama pull qwen3-coder:30b   # or the tag resolved in Step 1
-ollama list
+VENV=$HOME/.local/share/mlx-venv
+"$VENV/bin/vllm-mlx" download mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+"$VENV/bin/vllm-mlx" download RadixArk/Muse-Glimmer-q4-MLX
+du -sh ~/.cache/huggingface
 ```
 
 - [ ] **Step 5: Run the test to verify it passes**
@@ -293,20 +405,23 @@ ollama list
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `10 passed, 0 failed`.
+Expected: `11 passed, 0 failed`.
 
 - [ ] **Step 6: Measure the short-context baseline**
 
-The spec's `~130 tok/s` and `~25–35 tok/s` are third-party figures. These are ariane's.
+Raw MLX, no server, so this isolates model speed from serving overhead.
 
 ```bash
-for m in muse-glimmer:30b-mlx qwen3-coder:30b; do
-  echo "=== $m ==="
-  ollama run "$m" --verbose "Write a Python function that reverses a linked list." 2>&1 | tail -12
+VENV=$HOME/.local/share/mlx-venv
+for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit RadixArk/Muse-Glimmer-q4-MLX; do
+  echo "=== $repo ==="
+  "$VENV/bin/mlx_lm.generate" --model "$repo" \
+    --prompt "Write a Python function that reverses a linked list." \
+    --max-tokens 200 2>&1 | tail -8
 done
 ```
 
-Record `prompt eval rate` and `eval rate` for each.
+`mlx_lm.generate` prints prompt and generation tok/s. Record both.
 
 - [ ] **Step 7: Write the findings doc**
 
@@ -315,178 +430,243 @@ Create `docs/local-llm.md`:
 ```markdown
 # Local LLM on ariane
 
-Runtime: Ollama on its MLX backend. Design rationale and rejected alternatives
-live in `docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md`.
+Metal-enabled MLX from PyPI, served by vllm-mlx. Design rationale, the failed
+nixpkgs attempt, and rejected alternatives are in
+`docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md`.
 
-## Resolved model tags
+## Why a uv venv and not nixpkgs
 
-| Role | Ollama tag |
+nixpkgs builds `python3Packages.mlx` with `-DMLX_BUILD_METAL:BOOL=FALSE` and
+`ollama` with `OLLAMA_MLX_BACKENDS=""`, because Nix's sandbox cannot reach
+Apple's closed-source `metal` compiler. Both import and run — on the CPU,
+silently. Apple's PyPI wheels carry the Metal backend in a separate
+`mlx-metal` package.
+
+The venv lives at `~/.local/share/mlx-venv` and is reproduced from
+`home/llm-requirements.txt` by `llm sync`. `llm doctor` reports drift.
+
+## Resolved model repos
+
+| Role | HuggingFace repo |
 |---|---|
-| Agentic | `muse-glimmer:30b-mlx` |
-| Coding / bulk | `qwen3-coder:30b` |
+| Coding / bulk | _fill from Task 2 Step 1_ |
+| Agentic | _fill from Task 2 Step 1_ |
 
 ## Measured on ariane (M4 Pro, 48 GB)
 
-Short context (~50-token prompt), `ollama run --verbose`:
+Short context (~50-token prompt), `mlx_lm.generate`, no server:
 
-| Model | Prompt eval | Eval (generation) |
+| Model | Prompt tok/s | Generation tok/s |
 |---|---|---|
-| muse-glimmer:30b-mlx | _fill from Step 6_ | _fill from Step 6_ |
-| qwen3-coder:30b | _fill from Step 6_ | _fill from Step 6_ |
+| _coder_ | _fill from Step 6_ | _fill from Step 6_ |
+| _agent_ | _fill from Step 6_ | _fill from Step 6_ |
 
 Long-context figures are added by Task 7.
 
 ## GPU memory limit
 
-macOS caps GPU-addressable unified memory at ~75% (~36 GB of 48 GB) by
-default. With ~19 GB of weights that leaves ~17 GB of KV cache, which agentic
-sessions will press. Raise it to 40 GB for a session:
+`mx.device_info()` reports a **37.4 GiB** max recommended working set against
+48 GB of physical memory — macOS caps GPU-addressable unified memory at ~75%
+by default. With ~19 GB of weights that leaves ~18 GB for KV cache. Raise it
+for a session with:
 
     sudo sysctl iogpu.wired_limit_mb=40960
 
 Needs `sudo` and does not survive reboot, which is why it is documented here
-rather than managed by Home Manager.
+rather than managed by Home Manager. `vllm-mlx --kv-cache-quantization
+--kv-cache-quantization-bits 4` is the other lever and does not need root.
 ```
 
-Replace each `_fill from Step 6_` with the real number before committing. A committed placeholder is a plan failure.
+Replace every `_fill_` with a real value before committing. A committed placeholder is a plan failure.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 cd ~/nixosdotfiles
 git add tests/llm.test.sh docs/local-llm.md
-git commit -m "Pull local models, record short-context baseline on ariane"
+git commit -m "Resolve MLX model repos, record short-context baseline" \
+  -- tests/llm.test.sh docs/local-llm.md
 ```
 
 ---
 
-### Task 3: Tool calling verified, and the `/v1` vs `/api/chat` question resolved
+### Task 3: vllm-mlx serving, with tool calling verified per model
 
-The spec's Risk 1 and its single open question. This is the task most likely to fail, and it gates OpenCode entirely — do not start Task 5 until this passes.
+The gate. Risk 1 lives here. Do not start Task 5 until this passes.
 
 **Files:**
 - Modify: `tests/llm.test.sh` (append a Task 3 section)
+- Create: `~/.config/mlx/api-key` (never committed)
 - Modify: `docs/local-llm.md` (append a "Tool calling" section)
 
 **Interfaces:**
-- Consumes: both model tags from Task 2, the running server from Task 1.
-- Produces: a recorded decision — endpoint `http://127.0.0.1:11434/v1` (OpenAI-compatible) or `http://127.0.0.1:11434/api/chat` (Ollama native) — consumed verbatim by Task 5's OpenCode `baseURL`.
+- Consumes: model repo ids from Task 2.
+- Produces: a working `--tool-call-parser` choice per model, consumed verbatim by Task 4's serve flags. An API key file at `~/.config/mlx/api-key`, mode 0600.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Generate the API key**
+
+The repo is public and this key must never reach it.
+
+```bash
+mkdir -p ~/.config/mlx
+umask 077
+openssl rand -hex 32 > ~/.config/mlx/api-key
+chmod 600 ~/.config/mlx/api-key
+ls -l ~/.config/mlx/api-key   # must show -rw-------
+```
+
+- [ ] **Step 2: Start the coding model with its dedicated parser**
+
+`qwen3_coder` is a purpose-built parser in vllm-mlx's list — the strongest available answer to Risk 1.
+
+```bash
+VENV=$HOME/.local/share/mlx-venv
+KEY=$(cat ~/.config/mlx/api-key)
+nohup "$VENV/bin/vllm-mlx" serve mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit \
+  --host 127.0.0.1 --port 8000 \
+  --api-key "$KEY" \
+  --enable-prefix-cache --use-paged-cache \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+  > /tmp/vllm-mlx.log 2>&1 &
+
+for i in $(seq 1 120); do
+  sleep 2
+  curl -sf -H "Authorization: Bearer $KEY" --max-time 2 \
+    http://127.0.0.1:8000/v1/models >/dev/null 2>&1 && { echo "up after ~$((i*2))s"; break; }
+done
+tail -5 /tmp/vllm-mlx.log
+```
+
+A 30B model takes appreciably longer than the ~26 s a 1B took.
+
+- [ ] **Step 3: Write the failing test**
 
 Append to `tests/llm.test.sh`, before the final `printf`:
 
 ```bash
 echo
-echo "== Task 3: tool calling =="
+echo "== Task 3: serving + tool calling =="
 
-TOOLS_PAYLOAD='{
+KEYFILE="$HOME/.config/mlx/api-key"
+if [ -f "$KEYFILE" ]; then
+  ok "api key file exists"
+  check "api key is 0600" "$(stat -f '%Lp' "$KEYFILE")" "600"
+  KEY="$(cat "$KEYFILE")"
+else
+  bad "api key file exists" "$KEYFILE missing"
+  KEY=""
+fi
+
+AUTH=(-H "Authorization: Bearer $KEY")
+
+# Unauthenticated requests must be refused -- the key is not decoration.
+UNAUTH="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+  http://127.0.0.1:8000/v1/models 2>/dev/null)"
+case "$UNAUTH" in
+  401|403) ok "unauthenticated request refused ($UNAUTH)" ;;
+  *) bad "unauthenticated request refused" "got HTTP $UNAUTH, expected 401/403" ;;
+esac
+
+SERVED="$(curl -s "${AUTH[@]}" --max-time 10 http://127.0.0.1:8000/v1/models \
+  | jq -r '.data[0].id // "none"' 2>/dev/null)"
+[ "$SERVED" != "none" ] && ok "server lists a model ($SERVED)" \
+  || bad "server lists a model" "no model from /v1/models"
+
+# The Risk 1 assertion. A 1B probe emitted Python source instead of a tool
+# call; that was a model-capability failure. This is the real test.
+TOOLS='{
   "model": "MODEL_PLACEHOLDER",
-  "messages": [
-    {"role": "user", "content": "What is the current weather in Asheville, NC? Use the tool."}
-  ],
-  "tools": [{
-    "type": "function",
-    "function": {
-      "name": "get_weather",
-      "description": "Get the current weather for a city",
-      "parameters": {
-        "type": "object",
-        "properties": {"city": {"type": "string", "description": "City name"}},
-        "required": ["city"]
-      }
-    }
-  }],
-  "stream": false
-}'
+  "messages": [{"role":"user","content":"What is the current weather in Asheville, NC? Use the tool."}],
+  "tools": [{"type":"function","function":{
+    "name":"get_weather","description":"Get the current weather for a city",
+    "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],
+  "stream": false }'
 
-for m in muse-glimmer:30b-mlx qwen3-coder:30b; do
-  body="${TOOLS_PAYLOAD/MODEL_PLACEHOLDER/$m}"
-  name="$(curl -s --max-time 180 http://127.0.0.1:11434/v1/chat/completions \
-    -H 'Content-Type: application/json' -d "$body" \
-    | jq -r '.choices[0].message.tool_calls[0].function.name // "none"' 2>/dev/null)"
-  check "/v1 tool call: $m" "$name" "get_weather"
-done
+body="${TOOLS/MODEL_PLACEHOLDER/$SERVED}"
+TC="$(curl -s "${AUTH[@]}" --max-time 300 http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' -d "$body" \
+  | jq -r '.choices[0].message.tool_calls[0].function.name // "none"' 2>/dev/null)"
+check "tool call parsed for $SERVED" "$TC" "get_weather"
+
+# Prefix caching must actually engage -- it is why vllm-mlx was chosen.
+HITRATIO="$(curl -s "${AUTH[@]}" --max-time 10 http://127.0.0.1:8000/v1/cache/stats \
+  | jq -r '.engine_cache.system_kv_cache.counters | has("hit_ratio")' 2>/dev/null)"
+check "prefix cache is instrumented" "$HITRATIO" "true"
 ```
 
-- [ ] **Step 2: Run it to verify it fails or passes**
+- [ ] **Step 4: Run it**
 
 ```bash
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Unlike a normal TDD step this one may legitimately pass immediately — the models and server already exist, and this test probes behaviour rather than absent code. Both outcomes are informative:
+Unlike a normal TDD step, the tool-call check probes behaviour of a server that already exists, so it may pass on first run. Both outcomes are informative:
 
-- **Both `get_weather`** → `/v1` works. Record `/v1` as the endpoint and skip to Step 5.
-- **Either `none`** → continue to Step 3.
+- **`get_weather`** → the coding model's tool calling works. Continue to Step 5.
+- **`none`** → try `--tool-call-parser auto` and then `qwen`, restarting the server between attempts. Record which parser works.
 
-- [ ] **Step 3: Try Ollama's native endpoint**
+If no parser produces a tool call for the coding model, **stop and report**. That is Risk 1 materialising and it blocks Task 5.
 
-The OpenAI compatibility layer omits `tool_choice`, `logprobs`, and `logit_bias`, and parses tool-call delimiters less forgivingly. The native endpoint is the documented out.
+- [ ] **Step 5: Repeat for the agentic model**
 
-```bash
-curl -s --max-time 180 http://127.0.0.1:11434/api/chat -H 'Content-Type: application/json' -d '{
-  "model": "muse-glimmer:30b-mlx",
-  "messages": [{"role": "user", "content": "What is the current weather in Asheville, NC? Use the tool."}],
-  "tools": [{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],
-  "stream": false
-}' | jq '.message.tool_calls'
-```
-
-Expected on success: an array whose first element has `.function.name == "get_weather"`.
-
-- [ ] **Step 4: If both endpoints fail, raise the context and retry**
-
-A truncated system prompt drops the tool definitions before the model ever sees them, which presents as "the model just answers in prose". Confirm this is not the cause before concluding the model cannot tool-call:
+There is **no `muse` parser** in vllm-mlx. Start with `auto`.
 
 ```bash
-OLLAMA_CONTEXT_LENGTH=65536 ollama serve &>/tmp/ollama-serve.log &
-sleep 3
-# re-run Step 3
+pkill -f 'vllm-mlx serve'; sleep 2
+VENV=$HOME/.local/share/mlx-venv
+KEY=$(cat ~/.config/mlx/api-key)
+nohup "$VENV/bin/vllm-mlx" serve RadixArk/Muse-Glimmer-q4-MLX \
+  --host 127.0.0.1 --port 8000 --api-key "$KEY" \
+  --enable-prefix-cache --use-paged-cache \
+  --enable-auto-tool-choice --tool-call-parser auto \
+  > /tmp/vllm-mlx.log 2>&1 &
+# wait for readiness as in Step 2, then re-run the tool-call curl from Step 3
 ```
 
-If tool calls still fail on both endpoints and both models, stop and report. The remaining mitigations — OpenCode's `toolParser` array and a chat-template override — are Task 5 concerns and should not be attempted blind here.
+If `auto` fails, try `hermes` then `llama` — both are common formats for Llama-lineage models, and Muse Glimmer is a Meta model. Record the working parser, or record plainly that none worked.
 
-- [ ] **Step 5: Record the decision**
+- [ ] **Step 6: Record the results**
 
 Append to `docs/local-llm.md`:
 
 ```markdown
 ## Tool calling
 
-Endpoint in use: `http://127.0.0.1:11434/v1` — or `/api/chat`, whichever passed.
+| Model | Parser that works | Verified |
+|---|---|---|
+| _coder_ | _e.g. qwen3_coder_ | _date_ |
+| _agent_ | _e.g. auto, or "none — see below"_ | _date_ |
 
-Verified with a single-function `get_weather` schema against both models on
-_date_. Re-run with `bash tests/llm.test.sh`.
+Server: `http://127.0.0.1:8000`, loopback only, API key at
+`~/.config/mlx/api-key` (mode 0600, never committed).
 
-Known constraint: Ollama's OpenAI compatibility layer omits `tool_choice`,
-`logprobs`, and `logit_bias`. If OpenCode ever needs to force a specific tool,
-that is the reason it will not work over `/v1`.
+Re-verify with `bash tests/llm.test.sh`.
 ```
 
-Replace the endpoint line and `_date_` with real values.
+Replace every italic placeholder with a real value.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd ~/nixosdotfiles
 git add tests/llm.test.sh docs/local-llm.md
-git commit -m "Verify local tool calling, pin the OpenCode endpoint choice"
+git commit -m "Verify vllm-mlx serving and per-model tool-call parsers" \
+  -- tests/llm.test.sh docs/local-llm.md
 ```
+
+Confirm with `git status --short` that `~/.config/mlx/api-key` is nowhere in the repo — it lives in `~/.config`, outside the tree, and must stay there.
 
 ---
 
-### Task 4: The `llm` command
-
-On-demand serving, per the spec's explicit rejection of an always-on agent.
+### Task 4: The `llm` serve commands
 
 **Files:**
-- Modify: `home/llm.nix` (add the `llm` script and fish abbreviations)
+- Modify: `home/llm.nix` (extend the `llm` script)
 - Modify: `tests/llm.test.sh` (append a Task 4 section)
 
 **Interfaces:**
-- Consumes: model tags from Task 2.
-- Produces: an `llm` binary on PATH with subcommands `agent`, `coder`, `stop`, `status`, `bench`. Task 6 adds `long` to the same dispatch.
+- Consumes: model repo ids from Task 2, working parsers from Task 3.
+- Produces: `llm agent`, `llm coder`, `llm stop`, `llm status` alongside the existing `sync`, `lock`, `doctor`. Task 6 adds `long`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -494,19 +674,17 @@ Append to `tests/llm.test.sh`, before the final `printf`:
 
 ```bash
 echo
-echo "== Task 4: llm command =="
-have llm
+echo "== Task 4: llm serve commands =="
 
 LLM_HELP="$(llm 2>&1 || true)"
-for sub in agent coder stop status bench; do
+for sub in sync lock doctor agent coder stop status; do
   case "$LLM_HELP" in
     *"$sub"*) ok "llm usage mentions '$sub'" ;;
     *) bad "llm usage mentions '$sub'" "usage was: ${LLM_HELP:0:200}" ;;
   esac
 done
 
-# `llm stop` must be idempotent -- calling it with nothing running is the
-# normal case after a reboot and must not error.
+# Idempotent by contract: the normal state after a reboot is nothing running.
 llm stop >/dev/null 2>&1
 check "llm stop is idempotent" "$?" "0"
 ```
@@ -517,114 +695,87 @@ check "llm stop is idempotent" "$?" "0"
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `llm on PATH: not found`, five `usage mentions` failures, and the idempotency check failing.
+Expected: `sync`, `lock`, and `doctor` pass (Task 1 added them); `agent`, `coder`, `stop`, `status` FAIL; the idempotency check FAILs because `llm stop` exits 1 from the usage branch.
 
-- [ ] **Step 3: Add the script to `home/llm.nix`**
+- [ ] **Step 3: Extend `home/llm.nix`**
 
-Insert into the existing `let` block, after the `mlxPython` binding:
+Add to the `let` block, after `reqLock`. Substitute the repo ids from Task 2 and the parsers from Task 3.
 
 ```nix
-  agentModel = "muse-glimmer:30b-mlx";
-  coderModel = "qwen3-coder:30b";
+  coderRepo = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit";
+  coderParser = "qwen3_coder";
+  agentRepo = "RadixArk/Muse-Glimmer-q4-MLX";
+  agentParser = "auto";
+  port = "8000";
+```
 
-  # On-demand, deliberately: both models resident is ~36 GB of 48 GB, so a
-  # launchd agent holding one warm was rejected in the spec. `llm stop` is the
-  # other half of that bargain and must actually free the memory.
-  llm = pkgs.writeShellScriptBin "llm" ''
-    set -euo pipefail
-    export PATH="${lib.makeBinPath (with pkgs; [ ollama curl coreutils ])}:$PATH"
-    export OLLAMA_HOST="127.0.0.1:11434"
+Add these branches to the `case`, before the `*)` default:
 
-    log="''${TMPDIR:-/tmp}/ollama-serve.log"
-
-    serve_if_needed() {
-      if curl -sf --max-time 2 "http://$OLLAMA_HOST/api/tags" >/dev/null 2>&1; then
-        return 0
-      fi
-      echo "starting ollama (log: $log)" >&2
-      nohup ollama serve >"$log" 2>&1 &
-      for _ in $(seq 1 30); do
-        sleep 1
-        curl -sf --max-time 2 "http://$OLLAMA_HOST/api/tags" >/dev/null 2>&1 && return 0
-      done
-      echo "ollama did not come up within 30s; see $log" >&2
-      return 1
-    }
-
-    # Load one model and unload the other, so the two never co-reside.
-    # keep_alive: -1 pins the wanted model; 0 evicts the unwanted one.
-    load_only() {
-      local want="$1" drop="$2"
-      serve_if_needed
-      curl -sf "http://$OLLAMA_HOST/api/generate" \
-        -d "{\"model\":\"$drop\",\"keep_alive\":0}" >/dev/null 2>&1 || true
-      echo "loading $want" >&2
-      curl -sf "http://$OLLAMA_HOST/api/generate" \
-        -d "{\"model\":\"$want\",\"keep_alive\":-1}" >/dev/null
-      echo "$want ready on http://$OLLAMA_HOST" >&2
-    }
-
-    case "''${1-}" in
-      agent) load_only ${lib.escapeShellArg agentModel} ${lib.escapeShellArg coderModel} ;;
-      coder) load_only ${lib.escapeShellArg coderModel} ${lib.escapeShellArg agentModel} ;;
+```bash
+      agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ;;
+      coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} ;;
       status)
-        if curl -sf --max-time 2 "http://$OLLAMA_HOST/api/tags" >/dev/null 2>&1; then
-          ollama ps
+        if [ -f "$HOME/.config/mlx/api-key" ] && curl -sf --max-time 2 \
+             -H "Authorization: Bearer $(cat "$HOME/.config/mlx/api-key")" \
+             "http://127.0.0.1:${port}/v1/models" >/dev/null 2>&1; then
+          curl -s -H "Authorization: Bearer $(cat "$HOME/.config/mlx/api-key")" \
+            "http://127.0.0.1:${port}/v1/models" | jq -r '.data[].id'
+          echo "--- cache ---"
+          curl -s -H "Authorization: Bearer $(cat "$HOME/.config/mlx/api-key")" \
+            "http://127.0.0.1:${port}/v1/cache/stats" | jq -c '.engine_cache' 2>/dev/null || true
         else
-          echo "ollama not running"
+          echo "vllm-mlx not running"
         fi
         ;;
       stop)
-        # Idempotent by contract: tests/llm.test.sh asserts exit 0 with
-        # nothing running, which is the normal state after a reboot.
-        #
         # /usr/bin/pkill by absolute path, NOT via makeBinPath: nixpkgs'
         # `procps` is Linux-only (meta.platforms has no darwin), so adding it
-        # to the closure would fail the build on the one machine this module
-        # targets. macOS ships its own pkill and this module is darwin-gated.
-        /usr/bin/pkill -f 'ollama serve' 2>/dev/null || true
+        # would fail the build on the one machine this module targets. macOS
+        # ships its own pkill and this module is darwin-gated.
+        /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
         echo "stopped" >&2
         ;;
-      bench)
-        serve_if_needed
-        for m in ${lib.escapeShellArg agentModel} ${lib.escapeShellArg coderModel}; do
-          echo "=== $m ==="
-          ollama run "$m" --verbose \
-            "Write a Python function that reverses a linked list." 2>&1 | tail -12
-        done
-        ;;
-      *)
-        cat >&2 <<'USAGE'
-    usage: llm <command>
+```
 
-      agent    serve muse-glimmer:30b-mlx (tool use, long-horizon tasks)
-      coder    serve qwen3-coder:30b      (fast bulk work, completions)
-      status   show what is currently loaded
-      stop     tear down the server and free the memory
-      bench    short-context tok/s for both models
-    USAGE
+And add the `serve_model` helper next to `sync_venv`:
+
+```bash
+    serve_model() {
+      local repo="$1" parser="$2"
+      local keyfile="$HOME/.config/mlx/api-key"
+      if [ ! -f "$keyfile" ]; then
+        echo "no API key at $keyfile -- create one with:" >&2
+        echo "  mkdir -p ~/.config/mlx && (umask 077; openssl rand -hex 32 > $keyfile)" >&2
         exit 1
-        ;;
-    esac
-  '';
+      fi
+      if [ ! -x "$VENV/bin/vllm-mlx" ]; then
+        echo "venv missing -- run: llm sync" >&2
+        exit 1
+      fi
+      # Only one model fits at a time: ~19 GB of weights against a 37.4 GiB
+      # GPU working set. Evict whatever is running before loading another.
+      /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
+      sleep 1
+      echo "serving $repo (parser: $parser) on 127.0.0.1:${port}" >&2
+      exec "$VENV/bin/vllm-mlx" serve "$repo" \
+        --host 127.0.0.1 --port ${port} \
+        --api-key "$(cat "$keyfile")" \
+        --enable-prefix-cache --use-paged-cache \
+        --kv-cache-quantization --kv-cache-quantization-bits 4 \
+        --enable-auto-tool-choice --tool-call-parser "$parser" \
+        --offline
+    }
 ```
 
-Then add `llm` to the package list:
+`--offline` is safe here because Task 2 already downloaded both models; it is the PHI guarantee that the server makes no network calls during inference.
 
-```nix
-  home.packages = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-    pkgs.ollama
-    mlxPython
-    llm
-  ];
-```
+Update the usage heredoc to list all seven subcommands.
 
-- [ ] **Step 4: Apply**
+- [ ] **Step 4: Stage, dry-check, apply**
 
 ```bash
 cd ~/nixosdotfiles
-# Dry-check first (CLAUDE.md, "Common commands") -- evaluates to a
-# derivation path in seconds and catches option errors before a build.
+git add home/llm.nix
 nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
 home-manager switch --flake .#ariane -b backup
 ```
@@ -635,29 +786,28 @@ home-manager switch --flake .#ariane -b backup
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: all Task 1–4 checks pass, `19 passed, 0 failed`.
+Expected: `24 passed, 0 failed`.
 
 - [ ] **Step 6: Verify the memory actually comes back**
 
-The whole justification for on-demand is that `stop` frees ~19 GB. Confirm it, rather than assuming.
+On-demand is the whole justification for not running a launchd agent. Confirm `stop` frees the memory rather than assuming it.
 
 ```bash
-llm agent
-ollama ps                      # should show the model with a size
+llm coder &
+sleep 90
+llm status
+ps -o rss= -p "$(pgrep -f 'vllm-mlx serve' | head -1)" | awk '{printf "RSS: %.1f GiB\n", $1/1048576}'
 llm stop
 sleep 2
-ollama ps 2>&1 || echo "server down"
-pgrep -f 'ollama serve' || echo "no ollama process"
+pgrep -f 'vllm-mlx serve' >/dev/null && echo "STILL RUNNING" || echo "no vllm-mlx process"
 ```
-
-Expected: `ollama ps` lists the model while loaded; after `stop`, no process remains.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd ~/nixosdotfiles
-git add home/llm.nix tests/llm.test.sh
-git commit -m "Add on-demand llm command for local model serving"
+git add home/llm.nix
+git commit -m "Add llm serve/stop/status commands for on-demand vllm-mlx" -- home/llm.nix
 ```
 
 ---
@@ -669,8 +819,8 @@ git commit -m "Add on-demand llm command for local model serving"
 - Modify: `tests/llm.test.sh` (append a Task 5 section)
 
 **Interfaces:**
-- Consumes: the endpoint decided in Task 3, model tags from Task 2.
-- Produces: `~/.config/opencode/opencode.json`, Home Manager–managed and therefore read-only.
+- Consumes: port 8000, the API key path, model repo ids.
+- Produces: `~/.config/opencode/opencode.json`, Home Manager–managed and read-only.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -687,22 +837,30 @@ if [ -f "$CFG" ]; then
   check "share is disabled" "$(jq -r '.share' "$CFG")" "disabled"
   check "autoupdate is off"  "$(jq -r '.autoupdate' "$CFG")" "false"
   check "baseURL is loopback" \
-    "$(jq -r '.provider.ollama.options.baseURL' "$CFG")" \
-    "http://127.0.0.1:11434/v1"
+    "$(jq -r '.provider.mlx.options.baseURL' "$CFG")" \
+    "http://127.0.0.1:8000/v1"
 
   # Zero cloud providers. The whole PHI case rests on this one assertion.
   check "only the local provider is configured" \
-    "$(jq -r '.provider | keys | join(",")' "$CFG")" "ollama"
+    "$(jq -r '.provider | keys | join(",")' "$CFG")" "mlx"
 
-  # Managed by Home Manager means a store symlink, which means it cannot be
-  # edited in place to quietly add a cloud provider later.
+  # Managed by Home Manager means a store symlink, which means a cloud
+  # provider cannot be added by an in-place edit.
   [ -L "$CFG" ] && ok "config is a nix store symlink" \
                 || bad "config is a nix store symlink" "it is a plain file"
+
+  # The API key must be read from disk at runtime, never baked into a
+  # world-readable store path.
+  if grep -qE '[0-9a-f]{64}' "$CFG" 2>/dev/null; then
+    bad "no API key literal in config" "a 64-hex string is present"
+  else
+    ok "no API key literal in config"
+  fi
 fi
 
-# Nothing may listen off-loopback. This is the audit, not a formality.
+# Nothing may listen off-loopback.
 OFFLOOP="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
-  | grep -Ei 'ollama|llama' | grep -v '127\.0\.0\.1' | wc -l | tr -d ' ')"
+  | grep -Ei 'vllm|mlx|llama' | grep -v '127\.0\.0\.1' | wc -l | tr -d ' ')"
 check "no off-loopback llm listeners" "$OFFLOOP" "0"
 ```
 
@@ -712,11 +870,11 @@ check "no off-loopback llm listeners" "$OFFLOOP" "0"
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `opencode config exists` FAILs; the jq-dependent checks are skipped by the `if`. The `lsof` check may already pass — that is fine, it is a regression guard.
+Expected: `opencode config exists` FAILs and the jq checks are skipped. The `lsof` check may already pass — it is a regression guard.
 
 - [ ] **Step 3: Add the config to `home/llm.nix`**
 
-Append inside the top-level attribute set, after `home.sessionVariables`. If Task 3 selected `/api/chat`, change `baseURL` accordingly and update the test in Step 1 to match.
+Append inside the top-level attribute set, after `home.packages`:
 
 ```nix
   # OpenCode's local profile. Written through xdg.configFile so it lands as a
@@ -725,43 +883,52 @@ Append inside the top-level attribute set, after `home.sessionVariables`. If Tas
   #
   # `provider` deliberately contains exactly one entry. Every PHI guarantee in
   # the spec reduces to that fact plus the loopback baseURL.
+  #
+  # The API key is NOT written here. Nix store paths are world-readable, and
+  # this repo is public; the key stays in ~/.config/mlx/api-key at 0600 and is
+  # supplied through the OPENCODE_MLX_API_KEY environment variable, which
+  # home.sessionVariables populates below by reading that file at shell init.
   xdg.configFile."opencode/opencode.json" = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin {
     text = builtins.toJSON {
       "$schema" = "https://opencode.ai/config.json";
       share = "disabled";
       autoupdate = false;
       provider = {
-        ollama = {
+        mlx = {
           npm = "@ai-sdk/openai-compatible";
-          name = "Ollama (local, MLX)";
-          options.baseURL = "http://127.0.0.1:11434/v1";
+          name = "MLX (local, vllm-mlx)";
+          options = {
+            baseURL = "http://127.0.0.1:8000/v1";
+            apiKey = "{env:OPENCODE_MLX_API_KEY}";
+          };
           models = {
-            "muse-glimmer:30b-mlx" = {
-              name = "Muse Glimmer 30B — agentic";
-              tools = true;
-            };
-            "qwen3-coder:30b" = {
-              name = "Qwen3-Coder 30B A3B — coding";
-              tools = true;
-            };
+            "${coderRepo}" = { name = "Qwen3-Coder 30B A3B — coding"; tools = true; };
+            "${agentRepo}" = { name = "Muse Glimmer 30B — agentic"; tools = true; };
           };
         };
       };
     };
   };
+
+  programs.fish.interactiveShellInit = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin (lib.mkAfter ''
+    # OpenCode reads {env:OPENCODE_MLX_API_KEY} from its config. Sourced from
+    # the 0600 file rather than written into the world-readable nix store.
+    if test -r "$HOME/.config/mlx/api-key"
+        set -gx OPENCODE_MLX_API_KEY (cat "$HOME/.config/mlx/api-key")
+    end
+  '');
 ```
 
-- [ ] **Step 4: Apply**
+- [ ] **Step 4: Stage, dry-check, apply**
 
 ```bash
 cd ~/nixosdotfiles
-# Dry-check first (CLAUDE.md, "Common commands") -- evaluates to a
-# derivation path in seconds and catches option errors before a build.
+git add home/llm.nix
 nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
 home-manager switch --flake .#ariane -b backup
 ```
 
-If activation fails with a clobber error on `~/.config/opencode/opencode.json`, an unmanaged file is in the way. Inspect it, then move it aside — do not delete without looking:
+If activation fails with a clobber error on `~/.config/opencode/opencode.json`, an unmanaged file is in the way. Inspect it before moving it — do not delete blind:
 
 ```bash
 cat ~/.config/opencode/opencode.json
@@ -774,40 +941,41 @@ mv ~/.config/opencode/opencode.json ~/.config/opencode/opencode.json.pre-nix
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `26 passed, 0 failed`.
+Expected: `32 passed, 0 failed`.
 
-- [ ] **Step 6: Audit OpenCode's own network behaviour**
-
-The config disables sharing and autoupdate, but that is OpenCode's word for it. Verify no unexpected outbound connections during a local-only run:
+- [ ] **Step 6: End-to-end through OpenCode, with a network audit**
 
 ```bash
-llm coder
+llm coder &
+sleep 90
 cd /tmp && rm -rf llm-scratch && mkdir llm-scratch && cd llm-scratch
 git init -q && echo 'def add(a, b): return a - b' > calc.py && git add -A
 git -c user.email=kmello@broadriverrehab.com -c user.name=kyle commit -qm init
 
-# In a second terminal, watch for non-loopback connections from opencode:
+# In a second terminal, watch for non-loopback connections:
 #   lsof -nP -iTCP -a -c opencode -r2 | grep -v 127.0.0.1
-opencode run --model ollama/qwen3-coder:30b "Fix the bug in calc.py"
+opencode run --model mlx/mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit "Fix the bug in calc.py"
 ```
 
-Record in `docs/local-llm.md` whether anything appeared. Anything other than loopback is a finding to report, not to wave through.
+Record in `docs/local-llm.md` whether anything non-loopback appeared. Anything other than loopback is a finding to report, not to wave through.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd ~/nixosdotfiles
-git add home/llm.nix tests/llm.test.sh
-git commit -m "Wire OpenCode to the local provider, loopback-only, no cloud fallback"
+git add home/llm.nix
+git commit -m "Wire OpenCode to the local MLX provider, loopback-only, key off-store" -- home/llm.nix
 ```
 
 ---
 
 ### Task 6: llama.cpp escape hatch for prompts past 60K
 
+Retained but **demoted** — vllm-mlx's paged + prefix + SSD caching addresses much of the long-context weakness that originally justified this. Build it, measure it in Task 7, and let the numbers decide whether it earns its place.
+
 **Files:**
-- Modify: `flake.nix` (inputs block ~line 5–31, outputs destructure ~line 35, overlays list ~line 37–46)
-- Modify: `home/llm.nix` (add `llama-cpp` to packages, add the `long` subcommand)
+- Modify: `flake.nix` (inputs block, outputs destructure, overlays list)
+- Modify: `home/llm.nix` (add `llama-cpp`, add the `long` subcommand)
 - Modify: `tests/llm.test.sh` (append a Task 6 section)
 
 **Interfaces:**
@@ -847,11 +1015,10 @@ In the `inputs` block, after the `bitbucket-cli` entry:
 
 ```nix
     # llama.cpp only, pinned separately from the main nixpkgs. The escape hatch
-    # for prompts past ~60K tokens, where MLX's long-context penalty (~50% of
-    # llama.cpp+flash-attention on token generation) makes Ollama the wrong
-    # engine. Muse Glimmer support landed in llama.cpp b10353; the pinned
-    # nixos-unstable ships b10273, which is too old. A full `nix flake update`
-    # would fix it and rebuild the world -- this pins one package instead.
+    # for prompts past ~60K tokens. Muse Glimmer support landed in llama.cpp
+    # b10353; the pinned nixos-unstable ships b10273, which is too old. A full
+    # `nix flake update` would fix it and rebuild the world -- this pins one
+    # package instead.
     nixpkgs-llama.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 ```
 
@@ -876,26 +1043,20 @@ In the `overlays` list, after the `bitbucket-cli` overlay:
 ```bash
 cd ~/nixosdotfiles
 nix flake update nixpkgs-llama
-nix eval --raw .#legacyPackages.aarch64-darwin.llama-cpp.version 2>/dev/null \
-  || nix eval --raw "$(nix flake metadata --json | jq -r '.locks.nodes["nixpkgs-llama"].locked | "github:\(.owner)/\(.repo)/\(.rev)"')#llama-cpp.version"
+nix eval --raw "$(nix flake metadata --json | jq -r '.locks.nodes["nixpkgs-llama"].locked | "github:\(.owner)/\(.repo)/\(.rev)"')#llama-cpp.version"
 ```
 
-Expected: a number ≥ 10353. If it is lower, the branch regressed — pin an explicit known-good rev rather than the branch name.
+Expected: a number ≥ 10353. If lower, the branch regressed — pin an explicit known-good rev instead of the branch name.
 
-- [ ] **Step 5: Add `llama-cpp` and the `long` subcommand to `home/llm.nix`**
+- [ ] **Step 5: Add `llama-cpp` and the `long` subcommand**
 
-Add to the package list:
+Add `pkgs.llama-cpp` to `home.packages`, and add it to the script's `makeBinPath` list so `llama-server` resolves inside `llm`:
 
 ```nix
-  home.packages = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-    pkgs.ollama
-    pkgs.llama-cpp
-    mlxPython
-    llm
-  ];
+    export PATH="${lib.makeBinPath (with pkgs; [ uv curl coreutils jq gnugrep llama-cpp ])}:$PATH"
 ```
 
-In the `llm` script's `case`, add a `long` branch immediately before the `*)` default:
+Add a `long` branch to the `case`, before `*)`:
 
 ```bash
       long)
@@ -904,8 +1065,10 @@ In the `llm` script's `case`, add a `long` branch immediately before the `*)` de
           echo "usage: llm long <path-to.gguf>" >&2
           echo "the escape hatch for prompts past ~60K tokens, where MLX" >&2
           echo "runs at roughly half llama.cpp+flash-attention on decode." >&2
+          echo "no GGUF is downloaded by this setup -- fetch one yourself." >&2
           exit 1
         fi
+        /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
         exec llama-server \
           --model "$gguf" \
           --host 127.0.0.1 --port 8080 \
@@ -916,24 +1079,13 @@ In the `llm` script's `case`, add a `long` branch immediately before the `*)` de
         ;;
 ```
 
-Add `pkgs.llama-cpp` to the script's `makeBinPath` list so `llama-server` resolves inside it:
+Add `long` to the usage heredoc.
 
-```nix
-    export PATH="${lib.makeBinPath (with pkgs; [ ollama llama-cpp curl coreutils ])}:$PATH"
-```
-
-And add `long` to the usage heredoc:
-
-```
-      long     serve a GGUF via llama.cpp for >60K-token prompts
-```
-
-- [ ] **Step 6: Apply**
+- [ ] **Step 6: Stage, dry-check, apply**
 
 ```bash
 cd ~/nixosdotfiles
-# Dry-check first (CLAUDE.md, "Common commands") -- evaluates to a
-# derivation path in seconds and catches option errors before a build.
+git add flake.nix flake.lock home/llm.nix
 nix eval .#legacyPackages.aarch64-darwin.homeConfigurations.ariane.activationPackage.drvPath
 home-manager switch --flake .#ariane -b backup
 ```
@@ -946,26 +1098,28 @@ home-manager switch --flake .#ariane -b backup
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `28 passed, 0 failed`.
+Expected: `34 passed, 0 failed`.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 cd ~/nixosdotfiles
+git diff --cached --stat flake.lock   # inspect BEFORE committing
 git add flake.nix flake.lock home/llm.nix tests/llm.test.sh
-git commit -m "Pin llama-cpp >= b10353 as the long-context escape hatch"
+git commit -m "Pin llama-cpp >= b10353 as the long-context escape hatch" \
+  -- flake.nix flake.lock home/llm.nix tests/llm.test.sh
 ```
 
-`flake.lock` is staged here deliberately despite its pre-existing dirty state. Check `git diff --cached flake.lock` first and confirm the only change is the added `nixpkgs-llama` node — if the pre-existing delete/add churn is also staged, unstage and resolve that separately before committing.
+`flake.lock` carries a **pre-existing 15-line input bump** that predates this plan, plus the new `nixpkgs-llama` node. Both are intended. Confirm the diff contains nothing else.
 
 ---
 
-### Task 7: Long-context measurement and the end-to-end agent run
+### Task 7: Long-context measurement, routing rule, and the end-to-end agent run
 
-Closes Verification step 5 in the spec: the "which model when" rule gets written from ariane's numbers, not from blog posts.
+Writes the "which model when" rule from ariane's numbers instead of vendor claims.
 
 **Files:**
-- Modify: `docs/local-llm.md` (long-context table, routing rule)
+- Modify: `docs/local-llm.md`
 - Modify: `docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md` (status line)
 
 **Interfaces:**
@@ -977,13 +1131,13 @@ Closes Verification step 5 in the spec: the "which model when" rule gets written
 ```bash
 sudo sysctl iogpu.wired_limit_mb=40960
 sysctl iogpu.wired_limit_mb
+$HOME/.local/share/mlx-venv/bin/python -c \
+  'import mlx.core as mx; print(round(mx.device_info()["max_recommended_working_set_size"]/2**30,1), "GiB")'
 ```
 
-Expected: `iogpu.wired_limit_mb: 40960`. This does not survive reboot by design.
+Expected: `iogpu.wired_limit_mb: 40960`, and the reported working set rising from 37.4 GiB. Does not survive reboot, by design.
 
 - [ ] **Step 2: Build a ~40K-token prompt**
-
-The spec's central open risk is a third-party report of 3.5 minutes to first token at 40K. Measure it here.
 
 ```bash
 cd /tmp
@@ -993,18 +1147,29 @@ find /nix/store -maxdepth 4 -name '*.py' -size +4k 2>/dev/null | head -40 \
 wc -c big-prompt.txt
 ```
 
-- [ ] **Step 3: Measure time-to-first-token at 40K on both engines**
+- [ ] **Step 3: Measure time-to-first-token at 40K**
+
+The spec's central open risk is a third-party report of 3.5 minutes to first token at 40K on plain `mlx_lm.server`. vllm-mlx's paged and prefix caching is supposed to fix exactly this. Measure it.
 
 ```bash
-llm agent
-for m in muse-glimmer:30b-mlx qwen3-coder:30b; do
-  echo "=== $m @ 40K ==="
-  { printf 'Summarize what this code does in two sentences:\n\n'; cat /tmp/big-prompt.txt; } \
-    | OLLAMA_CONTEXT_LENGTH=65536 ollama run "$m" --verbose 2>&1 | tail -12
+KEY=$(cat ~/.config/mlx/api-key)
+llm coder & sleep 120
+
+PROMPT=$(jq -Rs . < /tmp/big-prompt.txt)
+for run in 1 2; do
+  echo "=== run $run (run 2 should hit the prefix cache) ==="
+  curl -s -o /dev/null -w 'total: %{time_total}s  ttfb: %{time_starttransfer}s\n' \
+    -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+    --max-time 900 http://127.0.0.1:8000/v1/chat/completions \
+    -d "{\"model\":\"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit\",
+         \"messages\":[{\"role\":\"user\",\"content\":$PROMPT}],
+         \"max_tokens\":64,\"stream\":false}"
 done
+curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8000/v1/cache/stats \
+  | jq '.engine_cache.system_kv_cache.counters'
 ```
 
-Record `prompt eval rate`, `eval rate`, and total duration for each.
+The run-1 vs run-2 gap and the `hit_ratio` are the measurement that justifies or refutes the whole vllm-mlx choice. Repeat for the agentic model.
 
 - [ ] **Step 4: Record the routing rule**
 
@@ -1013,10 +1178,10 @@ Append to `docs/local-llm.md`:
 ```markdown
 ## Measured: long context (~40K tokens)
 
-| Model | Prompt eval | Eval | Total |
+| Model | Run 1 TTFB | Run 2 TTFB (cached) | Cache hit ratio |
 |---|---|---|---|
-| muse-glimmer:30b-mlx | _fill_ | _fill_ | _fill_ |
-| qwen3-coder:30b | _fill_ | _fill_ | _fill_ |
+| _coder_ | _fill_ | _fill_ | _fill_ |
+| _agent_ | _fill_ | _fill_ | _fill_ |
 
 ## Which model when
 
@@ -1025,15 +1190,27 @@ Written from the numbers above, not from vendor claims.
 - `llm coder` — bulk work, completions, anything where throughput matters.
 - `llm agent` — multi-step tool use, where recovering from a failed call
   matters more than tok/s.
-- `llm long <gguf>` — prompts past the crossover point measured above, where
-  llama.cpp+flash-attention overtakes MLX.
+- `llm long <gguf>` — prompts past the crossover point measured above. If
+  vllm-mlx's prefix cache holds up at 40K, this may never be needed; say so
+  here explicitly rather than leaving it implied.
+
+## Pointing Claude Code at this server
+
+vllm-mlx serves an Anthropic-compatible `/v1/messages` endpoint (verified
+returning HTTP 200), so Claude Code itself can use the local models:
+
+    ANTHROPIC_BASE_URL=http://127.0.0.1:8000 \
+    ANTHROPIC_API_KEY=$(cat ~/.config/mlx/api-key) \
+    claude
+
+Untested as of writing — try it before relying on it.
 ```
 
-Replace every `_fill_` with a real number. State the crossover point explicitly if the 40K measurement shows one, and say plainly if it does not.
+Replace every `_fill_` with a real number.
 
 - [ ] **Step 5: Run the full end-to-end agent task**
 
-Not a toy. A multi-file change requiring several tool calls in sequence:
+Multi-file, multi-tool, not a toy:
 
 ```bash
 cd /tmp && rm -rf llm-e2e && mkdir llm-e2e && cd llm-e2e && git init -q
@@ -1046,20 +1223,20 @@ def total_value(items):
 PY
 git add -A && git -c user.email=kmello@broadriverrehab.com -c user.name=kyle commit -qm init
 
-llm agent
-opencode run --model ollama/muse-glimmer:30b-mlx \
+llm agent & sleep 120
+opencode run --model mlx/RadixArk/Muse-Glimmer-q4-MLX \
   "Add a tests/ directory with pytest tests for total_value, including an empty-list case and a case with a missing 'qty' key. Then fix total_value to handle the missing key without raising."
 ```
 
-Record: did it complete, how many tool calls, how long, and did the result actually run (`python -m pytest tests/`)?
+Record: did it complete, how many tool calls, how long, and does the result actually run (`python -m pytest tests/`)?
 
-- [ ] **Step 6: Run the full test suite one final time**
+- [ ] **Step 6: Run the full suite one final time**
 
 ```bash
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `28 passed, 0 failed`.
+Expected: `34 passed, 0 failed`.
 
 - [ ] **Step 7: Update the spec status**
 
@@ -1072,7 +1249,8 @@ In `docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md`, change:
 to:
 
 ```
-**Status:** Implemented 2026-08-__. Measured results in `docs/local-llm.md`.
+**Status:** Implemented 2026-08-__ per the Amendment (PyPI MLX + vllm-mlx).
+Measured results in `docs/local-llm.md`.
 ```
 
 Fill the real date.
@@ -1082,18 +1260,26 @@ Fill the real date.
 ```bash
 cd ~/nixosdotfiles
 git add docs/local-llm.md docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md
-git commit -m "Record measured local LLM performance and the model routing rule"
+git commit -m "Record measured MLX performance and the model routing rule" \
+  -- docs/local-llm.md docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md
 ```
 
 ---
 
 ## Self-review notes
 
-**Spec coverage.** Every spec section maps to a task: Component 1 (Ollama MLX) → Task 1–2; Component 2 (llama.cpp hatch) → Task 6; Component 3 (mlx-lm side channel) → Task 1; Component 4 (models) → Task 2; Component 5 (OpenCode) → Task 5; Component 6 (`home/llm.nix` runtime) → Task 4; Component 7 (memory headroom) → Task 2 Step 7 doc + Task 7 Step 1. PHI hardening → Task 5. All five Verification steps → Tasks 1, 3, 5, 7. Risk 1 → Task 3. Risk 2 → Task 6. Risk 3 → Task 3 Step 3. The spec's open question → Task 3, resolved empirically.
+**Spec coverage.** Amendment's replacement engine → Tasks 1, 3, 4. PyPI/uv decision → Task 1. Models → Task 2. Tool calling (Risk 1) → Task 3. PHI hardening → Tasks 3 (API key), 4 (`--offline`), 5 (config + lsof audit). Memory headroom → Task 2 doc, Task 4 (`--kv-cache-quantization`), Task 7 Step 1. llama.cpp escape hatch → Task 6. Measurement → Tasks 2, 7.
 
-**Two deliberate deviations from the spec, both narrowing scope:**
+**Changes from Revision 1, all forced by the nixpkgs finding:**
 
-- The spec listed `llm bench` as running `mlx_lm.generate` against HF MLX repos as a raw-runtime baseline. Task 4 implements `bench` against Ollama only. The MLX baseline would need a second ~19 GB copy of the weights in `~/.cache/huggingface` for a number that does not change any decision. `mlx_lm.generate` is still installed and the comparison remains available by hand.
-- The spec named `llm long` as a plain subcommand. Task 6 requires an explicit GGUF path argument, because no GGUF is downloaded anywhere in this plan — Ollama's store is not GGUF-addressable for `llama-server`. Acquiring one is left out rather than half-specified.
+- Ollama dropped entirely; Task 1 now asserts its *removal*.
+- `mlx_lm.server` never adopted; vllm-mlx is primary, which pulls the spec's phase-2 option forward.
+- Port 11434 → 8000. Model tags → HuggingFace repo ids.
+- API-key auth added throughout — vllm-mlx warns loudly without it, and the test asserts unauthenticated requests are refused.
+- `--offline` added as an explicit PHI control.
+- `--kv-cache-quantization-bits 4` added; it is a root-free lever on the 48 GB ceiling that Revision 1 had no answer for.
+- Test totals: 9 / 11 / 17 / 24 / 32 / 34.
 
-**Not verified during planning, and flagged in-task rather than guessed:** the Ollama tag for Qwen3-Coder-30B-A3B (Task 2 Step 1 resolves it), and whether `nixpkgs-unstable` still carries llama.cpp ≥ b10353 at execution time (Task 6 Step 4 checks).
+**Deliberate scope narrowing:** `llm long` still requires an explicit GGUF path because no task downloads a GGUF — HuggingFace MLX repos are safetensors, not GGUF. Acquiring one is left out rather than half-specified.
+
+**Not verified during planning, flagged in-task rather than guessed:** both HuggingFace repo ids (Task 2 Step 1), which tool-call parser each model needs (Task 3 — there is no `muse` parser), whether `nixpkgs-unstable` still carries llama.cpp ≥ b10353 (Task 6 Step 4), and whether Claude Code actually works against `/v1/messages` (Task 7 Step 4 documents it as untested).
