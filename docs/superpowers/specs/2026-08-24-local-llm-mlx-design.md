@@ -300,3 +300,102 @@ Whether OpenCode talks to Ollama through the OpenAI-compatible `/v1` endpoint or
 Ollama's native `/api/chat`. `/v1` is the cleaner config and keeps the escape
 hatch drop-in compatible; `/api/chat` has better tool-call fidelity. Resolve
 empirically at Verification step 2 rather than guessing now.
+
+---
+
+# Amendment — 2026-08-24, after Task 1 failed
+
+The original design above is **superseded in its runtime choice**. Recorded
+rather than rewritten, because the reasoning that led here is the useful part.
+
+## What broke
+
+Task 1 asserted MLX was on the GPU. It was not, and the cause is structural:
+
+| Component | Finding | Evidence |
+|---|---|---|
+| `python3Packages.mlx` (nixpkgs) | Built `-DMLX_BUILD_METAL:BOOL=FALSE` | `mx.metal.is_available()` → `False`, `default_device` → `Device(cpu, 0)` |
+| `ollama` (nixpkgs, 0.32.13 installed) | Built `OLLAMA_MLX_BACKENDS=""` | `$out/lib/ollama` holds only `llama-quantize` + `llama-server`; no MLX libs |
+
+Nix's build sandbox cannot reach Apple's closed-source `metal` compiler, so
+nixpkgs ships MLX with the Metal backend compiled out. Ollama's nixpkgs build
+disables its MLX backends for the same reason.
+
+Ollama still links `Metal.framework`, so GPU inference via llama.cpp works. It
+is **MLX specifically** that is absent — and MLX-engine snapshot caching was
+the entire reason Component 1 chose Ollama. That rationale is void.
+
+Note also: the installed Ollama is **0.32.13** from the flake's own nixpkgs,
+not the 0.32.6 the `nixpkgs#` registry reported and that the table above cites.
+
+## The replacement, chosen by Kyle from four options
+
+**MLX from Apple's PyPI wheels, in a `uv`-managed venv.** Verified working on
+ariane before adopting:
+
+```
+default_device: Device(gpu, 0)     metal available: True
+device: Apple M4 Pro               max recommended working set: 37.4 GiB
+```
+
+`mlx-metal` is a **separate wheel** (0.32.1) — that is the piece nixpkgs
+strips. The 37.4 GiB working set independently confirms this spec's ~36 GB
+memory estimate.
+
+### Engine: `vllm-mlx` 0.4.1, not `mlx_lm.server`
+
+The uv decision removes the packaging obstacle that made vllm-mlx "phase 2" in
+the Rejected Alternatives above. It is now the primary engine. Verified live on
+ariane serving `mlx-community/Llama-3.2-1B-Instruct-4bit`: bound to
+`127.0.0.1`, ready in ~26 s.
+
+It supplies, as real flags, everything this spec previously listed as a gap:
+
+- `--enable-prefix-cache`, `--use-paged-cache`, `--prefix-cache-size` — the
+  agentic-loop fix. Live and instrumented: `/v1/cache/stats` returns
+  hits/misses/stores/evictions/hit_ratio.
+- `--ssd-cache-dir`, `--ssd-cache-max-gb` — SSD-tiered KV cache.
+- `--kv-cache-quantization --kv-cache-quantization-bits {4,8}` — directly
+  attacks the 48 GB headroom problem in Component 7.
+- `--enable-auto-tool-choice --tool-call-parser {…,qwen3_coder,…}` — a parser
+  purpose-built for the coding model. This is the strongest available answer
+  to Risk 1.
+- `--auto-unload-idle-seconds` — the "always-on with idle unload" option
+  originally declined for lack of an implementation.
+- `--models-config` + `--lazy-load-model` — lazy multi-model serving, which
+  replaces the `llm coder` / `llm agent` load-and-evict dance.
+- `--offline`, `--api-key`, `--host` — PHI hardening.
+
+**`/v1/messages` (Anthropic) returns HTTP 200.** Claude Code itself can point
+at this server, which no previous option offered. `/v1/mcp/{tools,servers,execute}`
+also exist.
+
+### Consequences for the components above
+
+- **Component 1 (Ollama) is dropped entirely.** Without MLX it is a llama.cpp
+  wrapper, and llama.cpp direct is the better wrapper.
+- **Component 3 (`mlx-lm` side channel)** now comes from the same venv and is
+  genuinely GPU-capable, so `mlx_lm.generate` becomes a real baseline.
+- **Component 2 (llama.cpp escape hatch) is retained but demoted.** vllm-mlx's
+  paged + prefix + SSD cache addresses much of the long-context weakness that
+  justified it. Keep it; measure before relying on it.
+- **Models** are now HuggingFace MLX repos, not Ollama tags. The Task 2 tag
+  resolution becomes repo resolution.
+- **Port** moves from 11434 to vllm-mlx's default.
+
+### The declarative tradeoff, stated plainly
+
+This leaves pure Nix. The venv is materialized imperatively by `uv` and will
+not rebuild from the flake. What stays declarative is the *specification*: a
+pinned requirements set committed to the repo, with the venv built from it.
+Kyle chose this with the tradeoff on the table.
+
+### Risk 1 is unchanged and still the top risk
+
+A tool-calling probe against the 1B test model returned `tool_calls: null`;
+the model emitted Python source instead. That is a capability failure of a
+1B model, not a plumbing failure — but it means tool calling remains
+**unproven** until tested against the real models. `--tool-call-parser
+qwen3_coder` is a better starting position than Ollama's generic shim. There
+is **no `muse` parser** in vllm-mlx's list, so Muse Glimmer may need `auto`
+or may not parse at all. Test before relying on it.
