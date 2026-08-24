@@ -1,7 +1,8 @@
 # Local LLM on ariane: MLX runtime + OpenCode harness
 
 **Date:** 2026-08-24
-**Status:** Design approved, pending implementation plan
+**Status:** Implemented 2026-08-24 per the Amendment (PyPI MLX + vllm-mlx).
+Measured results in `docs/local-llm.md`.
 
 ## Goal
 

@@ -97,6 +97,44 @@ Ruled out before concluding this: `--use-paged-cache` was not the cause,
 documented "legacy mode only", and there is no warming endpoint
 (`/v1/cache/prefix` accepts DELETE only).
 
+## Measured: long context (~40K tokens)
+
+Same prompt three times, coder model, `--continuous-batching` on:
+
+```
+run 1  118.2s   cold -- full 40K prefill at ~338 tok/s
+run 2  117.0s   still cold
+run 3    1.58s  cache hit -- 75x faster, 35,891 tokens saved
+```
+
+**Run 2 does not hit.** The cache commits its entry after a completion, so the
+first repeat still pays full price; the third request is the first to benefit.
+This is harmless for agent loops, where a tool executes between turns, but it
+means a naive A/B benchmark of two runs will conclude the cache does nothing.
+That is exactly the mistake this project made once already.
+
+Practical read: a cold 40K context costs ~2 minutes. After that, every turn
+that shares the prefix is effectively free. The prefix cache holds ~3.1 GB and
+40K tokens consumed ~1.9 GB of it, so expect room for one or two large
+contexts before eviction.
+
+## Which model when
+
+Written from the numbers above, not from vendor claims.
+
+- **`llm coder`** — bulk work, completions, anything throughput-bound. Fastest
+  by a wide margin at 88 tok/s.
+- **`llm agent`** — multi-step tool use. 59 tok/s and a first-class `qwen`
+  parser; the natural default for OpenCode sessions.
+- **`llm hard`** — problems worth waiting on. 15 tok/s is roughly 6x slower
+  than the coder, so reach for it deliberately, not by default.
+- **`llm long`** — **rarely, if ever.** The original design assumed MLX would
+  collapse past 60K and llama.cpp would rescue it. With `--continuous-batching`
+  the prefix cache makes repeated long contexts cost 1.58s, so the hatch is
+  mostly redundant. It also cannot read these models (MLX safetensors, not
+  GGUF) and llama.cpp has open `qwen3_5` correctness bugs. Treat it as a
+  contingency, not a workflow.
+
 ## `HF_HUB_OFFLINE=1`, not `--offline`
 
 vllm-mlx's own `--offline` flag **fails to resolve models that are present in
