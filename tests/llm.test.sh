@@ -50,5 +50,25 @@ else
   bad "mlx gpu matmul returns finite" "no venv python"
 fi
 
+echo
+echo "== Task 2: models =="
+
+CODER_REPO="mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+AGENT_REPO="mlx-community/Muse-Glimmer-30B-4bit"
+
+# HF caches as models--<org>--<name>. Presence of a snapshot dir with a
+# safetensors file is the real test; a bare directory can exist from a failed
+# partial download.
+hf_cached() {
+  local repo="$1" dir
+  dir="$HOME/.cache/huggingface/hub/models--${repo//\//--}"
+  [ -d "$dir" ] && [ -n "$(find "$dir" -name '*.safetensors' -print -quit 2>/dev/null)" ]
+}
+
+hf_cached "$CODER_REPO" && ok "coder model cached ($CODER_REPO)" \
+  || bad "coder model cached ($CODER_REPO)" "no safetensors under ~/.cache/huggingface"
+hf_cached "$AGENT_REPO" && ok "agent model cached ($AGENT_REPO)" \
+  || bad "agent model cached ($AGENT_REPO)" "no safetensors under ~/.cache/huggingface"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
