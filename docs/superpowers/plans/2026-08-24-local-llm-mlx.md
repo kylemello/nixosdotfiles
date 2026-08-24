@@ -333,26 +333,43 @@ The explicit `--` pathspec keeps the staged `flake.lock` bump out of this commit
 
 **Interfaces:**
 - Consumes: the venv from Task 1.
-- Produces: two models in `~/.cache/huggingface`, referenced by exact repo id in every later task. Both ids are **unverified** and resolved in Step 1.
+- Produces: two models in `~/.cache/huggingface`, referenced by exact repo id in every later task. Both ids are **verified** (Step 1) and already substituted throughout this plan.
 
-- [ ] **Step 1: Resolve the real HuggingFace repo ids**
+- [ ] **Step 1: Confirm the resolved HuggingFace repo ids**
 
-Neither id was confirmed during planning. Do not guess — query the Hub.
+**Both ids were resolved against the Hub API on 2026-08-24.** The planning
+guess of `RadixArk/Muse-Glimmer-q4-MLX` was **wrong** and has been replaced
+throughout this plan. Use these:
+
+| Role | Repo | Safetensors | Size |
+|---|---|---|---|
+| Coding | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 4 | 16 GiB |
+| Agentic | `mlx-community/Muse-Glimmer-30B-4bit` | 4 | 18 GiB |
+
+Both carry `config.json`, `tokenizer_config.json`, and `chat_template.jinja`.
+The last is what tool calling depends on, so its presence was checked rather
+than assumed.
+
+`mlx-community` is the canonical MLX conversion org. Its Muse Glimmer build
+has ~31.8k downloads against RadixArk's ~8.3k, and the RadixArk repos are
+repacks of the vendor's llama.cpp GGUF rather than native MLX conversions.
+
+34 GiB total against 269 GB free.
+
+Sanity-check both still resolve before downloading — a repo can be renamed or
+withdrawn:
 
 ```bash
-VENV=$HOME/.local/share/mlx-venv
-# Coding model: an MLX 4-bit conversion of Qwen3-Coder-30B-A3B
-curl -s "https://huggingface.co/api/models?search=Qwen3-Coder-30B-A3B&limit=50" \
-  | jq -r '.[].id' | grep -iE 'mlx|4bit' | head -20
-echo "---"
-# Agentic model: an MLX conversion of Muse Glimmer 30B
-curl -s "https://huggingface.co/api/models?search=Muse-Glimmer&limit=50" \
-  | jq -r '.[].id' | grep -iE 'mlx' | head -20
+for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit \
+            mlx-community/Muse-Glimmer-30B-4bit; do
+  printf '%-52s ' "$repo"
+  curl -s -o /dev/null -w '%{http_code}\n' "https://huggingface.co/api/models/$repo"
+done
 ```
 
-Prefer `mlx-community/*` where it exists — it is the canonical MLX conversion org. Design research saw `mlx-community/Muse-Glimmer-30B-4bit` and `RadixArk/Muse-Glimmer-q4km-gs128-MLX`; confirm before use. Pick 4-bit for both: at ~17–19 GB each they fit the 37.4 GiB budget one at a time.
-
-Record both ids. They are referred to below as `$CODER_REPO` and `$AGENT_REPO`.
+Expected: `200` for both. On anything else, stop and re-resolve with
+`curl -s "https://huggingface.co/api/models?search=<name>&limit=100" | jq -r '.[].id'`
+rather than substituting a repo you have not checked.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1282,4 +1299,4 @@ git commit -m "Record measured MLX performance and the model routing rule" \
 
 **Deliberate scope narrowing:** `llm long` still requires an explicit GGUF path because no task downloads a GGUF — HuggingFace MLX repos are safetensors, not GGUF. Acquiring one is left out rather than half-specified.
 
-**Not verified during planning, flagged in-task rather than guessed:** both HuggingFace repo ids (Task 2 Step 1), which tool-call parser each model needs (Task 3 — there is no `muse` parser), whether `nixpkgs-unstable` still carries llama.cpp ≥ b10353 (Task 6 Step 4), and whether Claude Code actually works against `/v1/messages` (Task 7 Step 4 documents it as untested).
+**Not verified during planning, flagged in-task rather than guessed:** which tool-call parser each model needs (Task 3 — there is no `muse` parser), whether `nixpkgs-unstable` still carries llama.cpp ≥ b10353 (Task 6 Step 4), and whether Claude Code actually works against `/v1/messages` (Task 7 Step 4 documents it as untested).
