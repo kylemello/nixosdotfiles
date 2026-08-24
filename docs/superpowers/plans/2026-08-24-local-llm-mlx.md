@@ -52,6 +52,7 @@ Measured on ariane 2026-08-24. Trust these; re-deriving them wastes a task.
 - **Muse Glimmer is a vision-language model**: `architectures: ["MuseGlimmerForConditionalGeneration"]`, `model_type: muse_glimmer`, `vision_config` present. `mlx_lm` cannot load it (`Model type muse_glimmer not supported`); `mlx_vlm` can. **vllm-mlx needs `--mllm` to serve it.** The coding model is a plain LLM and must NOT get `--mllm`.
 - Measured on ariane in Task 2 — these are real, not third-party: coder `mlx_lm.generate` prompt 12.211 tok/s, generation **88.048** tok/s, peak 17.250 GB. Agentic `mlx_vlm.generate` prompt 47.577 tok/s, generation **15.123** tok/s, peak 19.646 GB. The coder figure is well below the ~130 tok/s the spec cites from a blog.
 - Ollama and the CPU-only nixpkgs `mlx` are **currently installed** by Home Manager generation 28 from the failed Revision 1. Task 1 removes them.
+- **A third model was added after Task 2, at Kyle's request:** `mlx-community/Qwen3.8-27B-4bit`, 14 GiB, 3 safetensors. It is **dense** (`Qwen3_5ForConditionalGeneration`, `model_type: qwen3_5`, no experts), unlike the coding model (`qwen3_moe`, 128 experts / 8 active). Expect it to generate at roughly Muse Glimmer's measured 15.4 tok/s rather than the coder's 88 — that is the dense/MoE gap, not a defect. It is the quality ceiling (SWE-bench Pro 61.7, thinking mode), not the speed path, and it takes the `llm hard` slot. It does **not** replace either existing model.
 
 ---
 
@@ -648,6 +649,42 @@ nohup "$VENV/bin/vllm-mlx" serve mlx-community/Muse-Glimmer-30B-4bit \
 
 If `harmony` fails, try in this order: `gpt-oss` (same token family), then `auto`, then `hermes`. Record the working parser, or record plainly that none worked. Loading a VLM is slower than an LLM — allow several minutes before concluding it is stuck.
 
+- [ ] **Step 5b: Download and probe the third model**
+
+`mlx-community/Qwen3.8-27B-4bit` was added after Task 2, so it still needs
+downloading. It is a plain LLM — **no `--mllm`**, unlike Muse Glimmer.
+
+```bash
+pkill -f 'vllm-mlx serve'; sleep 2
+VENV=$HOME/.local/share/mlx-venv
+"$VENV/bin/vllm-mlx" download mlx-community/Qwen3.8-27B-4bit   # 14 GiB
+
+KEY=$(cat ~/.config/mlx/api-key)
+nohup "$VENV/bin/vllm-mlx" serve mlx-community/Qwen3.8-27B-4bit \
+  --host 127.0.0.1 --port 8000 --api-key "$KEY" \
+  --enable-prefix-cache --use-paged-cache \
+  --enable-auto-tool-choice --tool-call-parser qwen \
+  > /tmp/vllm-mlx.log 2>&1 &
+# wait for readiness as in Step 2, then re-run the tool-call curl from Step 3
+```
+
+Parser order to try: `qwen` first (it is a Qwen-family model), then
+`qwen3_coder`, then `auto`. Qwen3.8 also has thinking/non-thinking modes, so
+if output arrives wrapped in reasoning tokens, add `--reasoning-parser qwen3`
+and note that it was needed.
+
+Also record a short-context baseline for it, matching Task 2's method, so the
+three models are comparable:
+
+```bash
+"$VENV/bin/mlx_lm.generate" --model mlx-community/Qwen3.8-27B-4bit \
+  --prompt "Write a Python function that reverses a linked list." \
+  --max-tokens 200 2>&1 | tail -8
+```
+
+Add its row to the Task 2 baseline table in `docs/local-llm.md`, noting the
+loader used.
+
 - [ ] **Step 6: Record the results**
 
 Append to `docs/local-llm.md`:
@@ -655,10 +692,11 @@ Append to `docs/local-llm.md`:
 ```markdown
 ## Tool calling
 
-| Model | Parser that works | Verified |
-|---|---|---|
-| _coder_ | _e.g. qwen3_coder_ | _date_ |
-| _agent_ | _e.g. auto, or "none — see below"_ | _date_ |
+| Model | Parser that works | `--mllm`? | Verified |
+|---|---|---|---|
+| _coder_ | _e.g. qwen3_coder_ | no | _date_ |
+| _agent_ | _e.g. harmony_ | yes | _date_ |
+| _hard_ | _e.g. qwen_ | no | _date_ |
 
 Server: `http://127.0.0.1:8000`, loopback only, API key at
 `~/.config/mlx/api-key` (mode 0600, never committed).
@@ -700,7 +738,7 @@ echo
 echo "== Task 4: llm serve commands =="
 
 LLM_HELP="$(llm 2>&1 || true)"
-for sub in sync lock doctor agent coder stop status; do
+for sub in sync lock doctor agent coder hard stop status; do
   case "$LLM_HELP" in
     *"$sub"*) ok "llm usage mentions '$sub'" ;;
     *) bad "llm usage mentions '$sub'" "usage was: ${LLM_HELP:0:200}" ;;
@@ -733,8 +771,15 @@ Add to the `let` block, after `reqLock`. Substitute the repo ids from Task 2 and
   # reading the template in Task 2. Replace with whatever Task 3 actually proved.
   agentParser = "harmony";
   # Muse Glimmer is MuseGlimmerForConditionalGeneration with a vision_config --
-  # a VLM. vllm-mlx needs --mllm to load it; the coding model must not get it.
+  # a VLM. vllm-mlx needs --mllm to load it; the other two must not get it.
   agentMllm = true;
+  # Added at Kyle's request after Task 2. Dense 27B, so ~5x slower to generate
+  # than the MoE coder (measured 88 tok/s vs an expected ~15-20) -- it is the
+  # quality ceiling, not the speed path. Deliberately a THIRD model rather than
+  # a replacement: the coder slot's job is cheap bulk work, which a dense model
+  # cannot do. Replace with whatever parser Task 3 actually proved.
+  hardRepo = "mlx-community/Qwen3.8-27B-4bit";
+  hardParser = "qwen";
   port = "8000";
 ```
 
@@ -743,6 +788,7 @@ Add these branches to the `case`, before the `*)` default:
 ```bash
       agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ${lib.escapeShellArg (if agentMllm then "--mllm" else "")} ;;
       coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} "" ;;
+      hard)  serve_model ${lib.escapeShellArg hardRepo}  ${lib.escapeShellArg hardParser}  "" ;;
       status)
         if [ -f "$HOME/.config/mlx/api-key" ] && curl -sf --max-time 2 \
              -H "Authorization: Bearer $(cat "$HOME/.config/mlx/api-key")" \
@@ -816,7 +862,7 @@ home-manager switch --flake .#ariane -b backup
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `24 passed, 0 failed`.
+Expected: `25 passed, 0 failed`.
 
 - [ ] **Step 6: Verify the memory actually comes back**
 
@@ -932,8 +978,9 @@ Append inside the top-level attribute set, after `home.packages`:
             apiKey = "{env:OPENCODE_MLX_API_KEY}";
           };
           models = {
-            "${coderRepo}" = { name = "Qwen3-Coder 30B A3B — coding"; tools = true; };
+            "${coderRepo}" = { name = "Qwen3-Coder 30B A3B — fast coding"; tools = true; };
             "${agentRepo}" = { name = "Muse Glimmer 30B — agentic"; tools = true; };
+            "${hardRepo}"  = { name = "Qwen3.8 27B — hard problems"; tools = true; };
           };
         };
       };
@@ -971,7 +1018,7 @@ mv ~/.config/opencode/opencode.json ~/.config/opencode/opencode.json.pre-nix
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `32 passed, 0 failed`.
+Expected: `33 passed, 0 failed`.
 
 - [ ] **Step 6: End-to-end through OpenCode, with a network audit**
 
@@ -1128,7 +1175,7 @@ home-manager switch --flake .#ariane -b backup
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `34 passed, 0 failed`.
+Expected: `35 passed, 0 failed`.
 
 - [ ] **Step 8: Commit**
 
@@ -1266,7 +1313,7 @@ Record: did it complete, how many tool calls, how long, and does the result actu
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `34 passed, 0 failed`.
+Expected: `35 passed, 0 failed`.
 
 - [ ] **Step 7: Update the spec status**
 
@@ -1308,7 +1355,7 @@ git commit -m "Record measured MLX performance and the model routing rule" \
 - API-key auth added throughout — vllm-mlx warns loudly without it, and the test asserts unauthenticated requests are refused.
 - `--offline` added as an explicit PHI control.
 - `--kv-cache-quantization-bits 4` added; it is a root-free lever on the 48 GB ceiling that Revision 1 had no answer for.
-- Test totals: 9 / 11 / 17 / 24 / 32 / 34.
+- Test totals: 9 / 11 / 17 / 25 / 33 / 35.
 
 **Deliberate scope narrowing:** `llm long` still requires an explicit GGUF path because no task downloads a GGUF — HuggingFace MLX repos are safetensors, not GGUF. Acquiring one is left out rather than half-specified.
 
