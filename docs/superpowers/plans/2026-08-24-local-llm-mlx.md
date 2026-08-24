@@ -48,8 +48,10 @@ Measured on ariane 2026-08-24. Trust these; re-deriving them wastes a task.
 - `vllm-mlx serve` works, binds `127.0.0.1`, and was ready in **~26 s** on a 1B model.
 - Routes confirmed live: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, **`/v1/messages` (Anthropic, HTTP 200)**, `/v1/cache/stats`, `/v1/cache/prefix`, `/v1/mcp/{tools,servers,execute}`, `/v1/embeddings`, `/v1/rerank`, `/health`, `/metrics`.
 - `/v1/cache/stats` returns real counters: `hits`, `misses`, `stores`, `evictions`, `hit_ratio`.
-- `--tool-call-parser` accepts: `auto, mistral, qwen, qwen3_coder, llama, hermes, harmony, gpt-oss, deepseek, kimi, granite, nemotron, xlam, functionary, gemma4, glm47, minimax`. There is no `muse` parser, but **Task 2 established that Muse Glimmer's chat template is harmony-format** — it emits `<|start|>`, `<|message|>`, `<|eom|>`, `<|eot|>` and `to=self` / `to=example` recipients. So `harmony` is the evidence-based first choice, not `auto`.
-- **Muse Glimmer is a vision-language model**: `architectures: ["MuseGlimmerForConditionalGeneration"]`, `model_type: muse_glimmer`, `vision_config` present. `mlx_lm` cannot load it (`Model type muse_glimmer not supported`); `mlx_vlm` can. **vllm-mlx needs `--mllm` to serve it.** The coding model is a plain LLM and must NOT get `--mllm`.
+- `--tool-call-parser` accepts: `auto, mistral, qwen, qwen3_coder, llama, hermes, harmony, gpt-oss, deepseek, kimi, granite, nemotron, xlam, functionary, gemma4, glm47, minimax`.
+- **Muse Glimmer was DROPPED after Task 2**, at Kyle's request, and replaced as the agentic model by `mlx-community/Qwen3.6-35B-A3B-4bit`. Reasons: Glimmer is dense (measured **15.4 tok/s**) where Qwen3.6-35B-A3B is MoE with ~3B active and should run near the coder's 88; Glimmer's chat template is harmony-format (`<|start|>`/`<|message|>`/`to=self`) with no matching `muse` parser, where Qwen3.6 uses plain ChatML (`<|im_start|>`/`<|im_end|>`, 28 tool references) and a first-class `qwen` parser; and Qwen3.6-35B-A3B posts **73.4% SWE-bench Verified** and **37.0% MCPMark** tool use. The 18 GiB Glimmer download from Task 2 is now dead weight and can be deleted.
+- **The agentic model is still a VLM**: `mlx-community/Qwen3.6-35B-A3B-4bit` is `Qwen3_5MoeForConditionalGeneration`, `model_type: qwen3_5_moe`, with a `vision_config`. **It still needs `--mllm`.** 19 GiB, 4 safetensors. The coding and hard models are plain LLMs and must NOT get `--mllm`.
+- **Open question for Task 3 to settle with measurements, not argument:** Qwen3.6-35B-A3B and Qwen3-Coder-30B-A3B are both MoE-A3B at similar speed, and Qwen3.6 scores higher on SWE-bench. If Task 3 confirms that, the dedicated coder model may be redundant. Do not drop it pre-emptively — record both models' numbers and let Kyle decide.
 - Measured on ariane in Task 2 — these are real, not third-party: coder `mlx_lm.generate` prompt 12.211 tok/s, generation **88.048** tok/s, peak 17.250 GB. Agentic `mlx_vlm.generate` prompt 47.577 tok/s, generation **15.123** tok/s, peak 19.646 GB. The coder figure is well below the ~130 tok/s the spec cites from a blog.
 - Ollama and the CPU-only nixpkgs `mlx` are **currently installed** by Home Manager generation 28 from the failed Revision 1. Task 1 removes them.
 - **A third model was added after Task 2, at Kyle's request:** `mlx-community/Qwen3.8-27B-4bit`, 14 GiB, 3 safetensors. It is **dense** (`Qwen3_5ForConditionalGeneration`, `model_type: qwen3_5`, no experts), unlike the coding model (`qwen3_moe`, 128 experts / 8 active). Expect it to generate at roughly Muse Glimmer's measured 15.4 tok/s rather than the coder's 88 — that is the dense/MoE gap, not a defect. It is the quality ceiling (SWE-bench Pro 61.7, thinking mode), not the speed path, and it takes the `llm hard` slot. It does **not** replace either existing model.
@@ -347,7 +349,7 @@ throughout this plan. Use these:
 | Role | Repo | Safetensors | Size |
 |---|---|---|---|
 | Coding | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 4 | 16 GiB |
-| Agentic | `mlx-community/Muse-Glimmer-30B-4bit` | 4 | 18 GiB |
+| Agentic | `mlx-community/Qwen3.6-35B-A3B-4bit` | 4 | 18 GiB |
 
 Both carry `config.json`, `tokenizer_config.json`, and `chat_template.jinja`.
 The last is what tool calling depends on, so its presence was checked rather
@@ -364,7 +366,7 @@ withdrawn:
 
 ```bash
 for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit \
-            mlx-community/Muse-Glimmer-30B-4bit; do
+            mlx-community/Qwen3.6-35B-A3B-4bit; do
   printf '%-52s ' "$repo"
   curl -s -o /dev/null -w '%{http_code}\n' "https://huggingface.co/api/models/$repo"
 done
@@ -383,7 +385,7 @@ echo
 echo "== Task 2: models =="
 
 CODER_REPO="mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
-AGENT_REPO="mlx-community/Muse-Glimmer-30B-4bit"
+AGENT_REPO="mlx-community/Qwen3.6-35B-A3B-4bit"
 
 # HF caches as models--<org>--<name>. Presence of a snapshot dir with a
 # safetensors file is the real test; a bare directory can exist from a failed
@@ -415,7 +417,7 @@ Expected: Task 1's nine checks still pass; the two new checks FAIL.
 ```bash
 VENV=$HOME/.local/share/mlx-venv
 "$VENV/bin/vllm-mlx" download mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
-"$VENV/bin/vllm-mlx" download mlx-community/Muse-Glimmer-30B-4bit
+"$VENV/bin/vllm-mlx" download mlx-community/Qwen3.6-35B-A3B-4bit
 du -sh ~/.cache/huggingface
 ```
 
@@ -433,7 +435,7 @@ Raw MLX, no server, so this isolates model speed from serving overhead.
 
 ```bash
 VENV=$HOME/.local/share/mlx-venv
-for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community/Muse-Glimmer-30B-4bit; do
+for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community/Qwen3.6-35B-A3B-4bit; do
   echo "=== $repo ==="
   "$VENV/bin/mlx_lm.generate" --model "$repo" \
     --prompt "Write a Python function that reverses a linked list." \
@@ -629,25 +631,33 @@ If no parser produces a tool call for the coding model, **stop and report**. Tha
 
 - [ ] **Step 5: Repeat for the agentic model**
 
-Two things differ from the coding model, both established in Task 2:
+The agentic model changed after Task 2: Muse Glimmer is out, `mlx-community/Qwen3.6-35B-A3B-4bit` is in. **It is not downloaded yet** — fetch it first:
 
-- Muse Glimmer is a **VLM**, so `vllm-mlx` needs **`--mllm`**. Without it the model will not load.
-- Its chat template is **harmony-format**, so start with `--tool-call-parser harmony` — not `auto`. This is evidence from the template itself, not a guess.
+```bash
+$HOME/.local/share/mlx-venv/bin/vllm-mlx download mlx-community/Qwen3.6-35B-A3B-4bit   # 19 GiB
+```
+
+Two things differ from the coding model:
+
+- It is a **VLM** (`Qwen3_5MoeForConditionalGeneration`, `vision_config` present), so `vllm-mlx` needs **`--mllm`**. Without it the model will not load.
+- Its chat template is plain **ChatML** (`<|im_start|>`/`<|im_end|>`), so use `--tool-call-parser qwen`. Fall back to `qwen3_coder`, then `auto`.
 
 ```bash
 pkill -f 'vllm-mlx serve'; sleep 2
 VENV=$HOME/.local/share/mlx-venv
 KEY=$(cat ~/.config/mlx/api-key)
-nohup "$VENV/bin/vllm-mlx" serve mlx-community/Muse-Glimmer-30B-4bit \
+nohup "$VENV/bin/vllm-mlx" serve mlx-community/Qwen3.6-35B-A3B-4bit \
   --host 127.0.0.1 --port 8000 --api-key "$KEY" \
   --enable-prefix-cache --use-paged-cache \
   --mllm \
-  --enable-auto-tool-choice --tool-call-parser harmony \
+  --enable-auto-tool-choice --tool-call-parser qwen \
   > /tmp/vllm-mlx.log 2>&1 &
 # wait for readiness as in Step 2, then re-run the tool-call curl from Step 3
 ```
 
-If `harmony` fails, try in this order: `gpt-oss` (same token family), then `auto`, then `hermes`. Record the working parser, or record plainly that none worked. Loading a VLM is slower than an LLM — allow several minutes before concluding it is stuck.
+If `qwen` fails, try `qwen3_coder`, then `auto`. Record the working parser, or record plainly that none worked. Loading a VLM is slower than an LLM — allow several minutes before concluding it is stuck.
+
+Also record its short-context baseline the way Task 2 did, using `mlx_vlm.generate` (it is a VLM, so `mlx_lm.generate` will refuse it), and add the row to the table in `docs/local-llm.md`. **This number decides the open question above** — if it lands near the coder's 88 tok/s, the swap achieved its purpose.
 
 - [ ] **Step 5b: Download and probe the third model**
 
@@ -765,13 +775,16 @@ Add to the `let` block, after `reqLock`. Substitute the repo ids from Task 2 and
 ```nix
   coderRepo = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit";
   coderParser = "qwen3_coder";
-  agentRepo = "mlx-community/Muse-Glimmer-30B-4bit";
-  # harmony, not auto: Muse Glimmer's chat template emits <|start|>/<|message|>/
-  # <|eom|> and to=<recipient>, which is the harmony token family. Confirmed by
-  # reading the template in Task 2. Replace with whatever Task 3 actually proved.
-  agentParser = "harmony";
-  # Muse Glimmer is MuseGlimmerForConditionalGeneration with a vision_config --
-  # a VLM. vllm-mlx needs --mllm to load it; the other two must not get it.
+  agentRepo = "mlx-community/Qwen3.6-35B-A3B-4bit";
+  # Plain ChatML (<|im_start|>/<|im_end|>), so the stock `qwen` parser applies.
+  # Replace with whatever Task 3 actually proved.
+  agentParser = "qwen";
+  # Replaced Muse Glimmer at Kyle's request. Glimmer was dense and measured
+  # 15.4 tok/s; this is MoE with ~3B active, so it should run near the coder's
+  # 88. It also drops the harmony-format problem -- plain ChatML with a
+  # first-class `qwen` parser. 73.4% SWE-bench Verified, 37.0% MCPMark.
+  # Still a VLM (Qwen3_5MoeForConditionalGeneration, vision_config present),
+  # so --mllm is still required; the other two models must NOT get it.
   agentMllm = true;
   # Added at Kyle's request after Task 2. Dense 27B, so ~5x slower to generate
   # than the MoE coder (measured 88 tok/s vs an expected ~15-20) -- it is the
@@ -979,7 +992,7 @@ Append inside the top-level attribute set, after `home.packages`:
           };
           models = {
             "${coderRepo}" = { name = "Qwen3-Coder 30B A3B — fast coding"; tools = true; };
-            "${agentRepo}" = { name = "Muse Glimmer 30B — agentic"; tools = true; };
+            "${agentRepo}" = { name = "Qwen3.6 35B-A3B — agentic"; tools = true; };
             "${hardRepo}"  = { name = "Qwen3.8 27B — hard problems"; tools = true; };
           };
         };
@@ -1301,7 +1314,7 @@ PY
 git add -A && git -c user.email=kmello@broadriverrehab.com -c user.name=kyle commit -qm init
 
 llm agent & sleep 120
-opencode run --model mlx/mlx-community/Muse-Glimmer-30B-4bit \
+opencode run --model mlx/mlx-community/Qwen3.6-35B-A3B-4bit \
   "Add a tests/ directory with pytest tests for total_value, including an empty-list case and a case with a missing 'qty' key. Then fix total_value to handle the missing key without raising."
 ```
 
