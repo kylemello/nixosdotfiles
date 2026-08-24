@@ -350,7 +350,7 @@ curl -s "https://huggingface.co/api/models?search=Muse-Glimmer&limit=50" \
   | jq -r '.[].id' | grep -iE 'mlx' | head -20
 ```
 
-Prefer `mlx-community/*` where it exists — it is the canonical MLX conversion org. Design research saw `RadixArk/Muse-Glimmer-q4-MLX` and `RadixArk/Muse-Glimmer-q4km-gs128-MLX`; confirm before use. Pick 4-bit for both: at ~17–19 GB each they fit the 37.4 GiB budget one at a time.
+Prefer `mlx-community/*` where it exists — it is the canonical MLX conversion org. Design research saw `mlx-community/Muse-Glimmer-30B-4bit` and `RadixArk/Muse-Glimmer-q4km-gs128-MLX`; confirm before use. Pick 4-bit for both: at ~17–19 GB each they fit the 37.4 GiB budget one at a time.
 
 Record both ids. They are referred to below as `$CODER_REPO` and `$AGENT_REPO`.
 
@@ -363,7 +363,7 @@ echo
 echo "== Task 2: models =="
 
 CODER_REPO="mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
-AGENT_REPO="RadixArk/Muse-Glimmer-q4-MLX"
+AGENT_REPO="mlx-community/Muse-Glimmer-30B-4bit"
 
 # HF caches as models--<org>--<name>. Presence of a snapshot dir with a
 # safetensors file is the real test; a bare directory can exist from a failed
@@ -395,7 +395,7 @@ Expected: Task 1's nine checks still pass; the two new checks FAIL.
 ```bash
 VENV=$HOME/.local/share/mlx-venv
 "$VENV/bin/vllm-mlx" download mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
-"$VENV/bin/vllm-mlx" download RadixArk/Muse-Glimmer-q4-MLX
+"$VENV/bin/vllm-mlx" download mlx-community/Muse-Glimmer-30B-4bit
 du -sh ~/.cache/huggingface
 ```
 
@@ -413,7 +413,7 @@ Raw MLX, no server, so this isolates model speed from serving overhead.
 
 ```bash
 VENV=$HOME/.local/share/mlx-venv
-for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit RadixArk/Muse-Glimmer-q4-MLX; do
+for repo in mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community/Muse-Glimmer-30B-4bit; do
   echo "=== $repo ==="
   "$VENV/bin/mlx_lm.generate" --model "$repo" \
     --prompt "Write a Python function that reverses a linked list." \
@@ -615,7 +615,7 @@ There is **no `muse` parser** in vllm-mlx. Start with `auto`.
 pkill -f 'vllm-mlx serve'; sleep 2
 VENV=$HOME/.local/share/mlx-venv
 KEY=$(cat ~/.config/mlx/api-key)
-nohup "$VENV/bin/vllm-mlx" serve RadixArk/Muse-Glimmer-q4-MLX \
+nohup "$VENV/bin/vllm-mlx" serve mlx-community/Muse-Glimmer-30B-4bit \
   --host 127.0.0.1 --port 8000 --api-key "$KEY" \
   --enable-prefix-cache --use-paged-cache \
   --enable-auto-tool-choice --tool-call-parser auto \
@@ -704,7 +704,7 @@ Add to the `let` block, after `reqLock`. Substitute the repo ids from Task 2 and
 ```nix
   coderRepo = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit";
   coderParser = "qwen3_coder";
-  agentRepo = "RadixArk/Muse-Glimmer-q4-MLX";
+  agentRepo = "mlx-community/Muse-Glimmer-30B-4bit";
   agentParser = "auto";
   port = "8000";
 ```
@@ -1224,7 +1224,7 @@ PY
 git add -A && git -c user.email=kmello@broadriverrehab.com -c user.name=kyle commit -qm init
 
 llm agent & sleep 120
-opencode run --model mlx/RadixArk/Muse-Glimmer-q4-MLX \
+opencode run --model mlx/mlx-community/Muse-Glimmer-30B-4bit \
   "Add a tests/ directory with pytest tests for total_value, including an empty-list case and a case with a missing 'qty' key. Then fix total_value to handle the missing key without raising."
 ```
 
