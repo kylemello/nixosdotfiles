@@ -71,20 +71,31 @@ have ollama
 have mlx_lm.generate
 have mlx_lm.server
 
+# Resolve the interpreter from the MLX env itself, NOT from a bare `python`
+# on PATH. There is no bare `python` on this machine, `python3` is Homebrew's
+# /opt/homebrew/bin/python3 (no mlx), and whether the nix profile wins depends
+# on PATH ordering. Deriving it from a console script the env owns is exact.
+MLX_PY="$(dirname "$(command -v mlx_lm.generate 2>/dev/null || echo /nonexistent/x)")/python"
+if [ -x "$MLX_PY" ]; then
+  ok "mlx env python resolved ($MLX_PY)"
+else
+  bad "mlx env python resolved" "no python next to mlx_lm.generate"
+fi
+
 # MLX must resolve to the GPU. A CPU fallback here would make every
 # benchmark in later tasks meaningless while still "working".
-MLX_DEV="$(python -c 'import mlx.core as mx; print(mx.default_device())' 2>&1)"
+MLX_DEV="$("$MLX_PY" -c 'import mlx.core as mx; print(mx.default_device())' 2>&1 | tail -1)"
 check "mlx default device is gpu" "$MLX_DEV" "Device(gpu, 0)"
 
 # A real matmul on the GPU, not just a device query. 2048x2048 normal matrix
 # squared and summed -- we assert only that it produces a finite float, since
 # the value is random.
-MLX_MM="$(python -c '
+MLX_MM="$("$MLX_PY" -c '
 import mlx.core as mx, math
 a = mx.random.normal((2048, 2048))
 s = float((a @ a).sum())
 print("finite" if math.isfinite(s) else "nonfinite")
-' 2>&1)"
+' 2>&1 | tail -1)"
 check "mlx gpu matmul returns finite" "$MLX_MM" "finite"
 
 check "OLLAMA_HOST is loopback" "${OLLAMA_HOST:-unset}" "127.0.0.1:11434"
@@ -99,7 +110,7 @@ printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: FAIL on every check — `ollama on PATH: not found`, `mlx_lm.generate on PATH: not found`, the two MLX checks reporting a `ModuleNotFoundError` traceback rather than `Device(gpu, 0)`, and `OLLAMA_HOST` `unset`.
+Expected: FAIL on every check — `ollama on PATH: not found`, `mlx_lm.generate on PATH: not found`, `mlx env python resolved: no python next to mlx_lm.generate`, the two MLX checks failing because `$MLX_PY` does not exist, and `OLLAMA_HOST` `unset`.
 
 - [ ] **Step 3: Write `home/llm.nix`**
 
@@ -189,7 +200,7 @@ exec fish -l
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `6 passed, 0 failed`.
+Expected: `7 passed, 0 failed`.
 
 If `mlx default device is gpu` reports `Device(cpu, 0)`, stop and do not proceed to Task 2 — every later benchmark would be measuring the wrong thing. Check that `xcrun -f metal` still resolves and that the process is not running under Rosetta (`sysctl -n sysctl.proc_translated` must print `0`).
 
@@ -282,7 +293,7 @@ ollama list
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `9 passed, 0 failed`.
+Expected: `10 passed, 0 failed`.
 
 - [ ] **Step 6: Measure the short-context baseline**
 
@@ -624,7 +635,7 @@ home-manager switch --flake .#ariane -b backup
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: all Task 1–4 checks pass, `18 passed, 0 failed`.
+Expected: all Task 1–4 checks pass, `19 passed, 0 failed`.
 
 - [ ] **Step 6: Verify the memory actually comes back**
 
@@ -763,7 +774,7 @@ mv ~/.config/opencode/opencode.json ~/.config/opencode/opencode.json.pre-nix
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `25 passed, 0 failed`.
+Expected: `26 passed, 0 failed`.
 
 - [ ] **Step 6: Audit OpenCode's own network behaviour**
 
@@ -935,7 +946,7 @@ home-manager switch --flake .#ariane -b backup
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `27 passed, 0 failed`.
+Expected: `28 passed, 0 failed`.
 
 - [ ] **Step 8: Commit**
 
@@ -1048,7 +1059,7 @@ Record: did it complete, how many tool calls, how long, and did the result actua
 cd ~/nixosdotfiles && bash tests/llm.test.sh
 ```
 
-Expected: `27 passed, 0 failed`.
+Expected: `28 passed, 0 failed`.
 
 - [ ] **Step 7: Update the spec status**
 
