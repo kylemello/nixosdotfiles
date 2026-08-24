@@ -48,7 +48,9 @@ Measured on ariane 2026-08-24. Trust these; re-deriving them wastes a task.
 - `vllm-mlx serve` works, binds `127.0.0.1`, and was ready in **~26 s** on a 1B model.
 - Routes confirmed live: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, **`/v1/messages` (Anthropic, HTTP 200)**, `/v1/cache/stats`, `/v1/cache/prefix`, `/v1/mcp/{tools,servers,execute}`, `/v1/embeddings`, `/v1/rerank`, `/health`, `/metrics`.
 - `/v1/cache/stats` returns real counters: `hits`, `misses`, `stores`, `evictions`, `hit_ratio`.
-- `--tool-call-parser` accepts: `auto, mistral, qwen, qwen3_coder, llama, hermes, harmony, gpt-oss, deepseek, kimi, granite, nemotron, xlam, functionary, gemma4, glm47, minimax`. **There is no `muse` parser** — Muse Glimmer must use `auto` or fail.
+- `--tool-call-parser` accepts: `auto, mistral, qwen, qwen3_coder, llama, hermes, harmony, gpt-oss, deepseek, kimi, granite, nemotron, xlam, functionary, gemma4, glm47, minimax`. There is no `muse` parser, but **Task 2 established that Muse Glimmer's chat template is harmony-format** — it emits `<|start|>`, `<|message|>`, `<|eom|>`, `<|eot|>` and `to=self` / `to=example` recipients. So `harmony` is the evidence-based first choice, not `auto`.
+- **Muse Glimmer is a vision-language model**: `architectures: ["MuseGlimmerForConditionalGeneration"]`, `model_type: muse_glimmer`, `vision_config` present. `mlx_lm` cannot load it (`Model type muse_glimmer not supported`); `mlx_vlm` can. **vllm-mlx needs `--mllm` to serve it.** The coding model is a plain LLM and must NOT get `--mllm`.
+- Measured on ariane in Task 2 — these are real, not third-party: coder `mlx_lm.generate` prompt 12.211 tok/s, generation **88.048** tok/s, peak 17.250 GB. Agentic `mlx_vlm.generate` prompt 47.577 tok/s, generation **15.123** tok/s, peak 19.646 GB. The coder figure is well below the ~130 tok/s the spec cites from a blog.
 - Ollama and the CPU-only nixpkgs `mlx` are **currently installed** by Home Manager generation 28 from the failed Revision 1. Task 1 removes them.
 
 ---
@@ -626,7 +628,10 @@ If no parser produces a tool call for the coding model, **stop and report**. Tha
 
 - [ ] **Step 5: Repeat for the agentic model**
 
-There is **no `muse` parser** in vllm-mlx. Start with `auto`.
+Two things differ from the coding model, both established in Task 2:
+
+- Muse Glimmer is a **VLM**, so `vllm-mlx` needs **`--mllm`**. Without it the model will not load.
+- Its chat template is **harmony-format**, so start with `--tool-call-parser harmony` — not `auto`. This is evidence from the template itself, not a guess.
 
 ```bash
 pkill -f 'vllm-mlx serve'; sleep 2
@@ -635,12 +640,13 @@ KEY=$(cat ~/.config/mlx/api-key)
 nohup "$VENV/bin/vllm-mlx" serve mlx-community/Muse-Glimmer-30B-4bit \
   --host 127.0.0.1 --port 8000 --api-key "$KEY" \
   --enable-prefix-cache --use-paged-cache \
-  --enable-auto-tool-choice --tool-call-parser auto \
+  --mllm \
+  --enable-auto-tool-choice --tool-call-parser harmony \
   > /tmp/vllm-mlx.log 2>&1 &
 # wait for readiness as in Step 2, then re-run the tool-call curl from Step 3
 ```
 
-If `auto` fails, try `hermes` then `llama` — both are common formats for Llama-lineage models, and Muse Glimmer is a Meta model. Record the working parser, or record plainly that none worked.
+If `harmony` fails, try in this order: `gpt-oss` (same token family), then `auto`, then `hermes`. Record the working parser, or record plainly that none worked. Loading a VLM is slower than an LLM — allow several minutes before concluding it is stuck.
 
 - [ ] **Step 6: Record the results**
 
@@ -722,15 +728,21 @@ Add to the `let` block, after `reqLock`. Substitute the repo ids from Task 2 and
   coderRepo = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit";
   coderParser = "qwen3_coder";
   agentRepo = "mlx-community/Muse-Glimmer-30B-4bit";
-  agentParser = "auto";
+  # harmony, not auto: Muse Glimmer's chat template emits <|start|>/<|message|>/
+  # <|eom|> and to=<recipient>, which is the harmony token family. Confirmed by
+  # reading the template in Task 2. Replace with whatever Task 3 actually proved.
+  agentParser = "harmony";
+  # Muse Glimmer is MuseGlimmerForConditionalGeneration with a vision_config --
+  # a VLM. vllm-mlx needs --mllm to load it; the coding model must not get it.
+  agentMllm = true;
   port = "8000";
 ```
 
 Add these branches to the `case`, before the `*)` default:
 
 ```bash
-      agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ;;
-      coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} ;;
+      agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ${lib.escapeShellArg (if agentMllm then "--mllm" else "")} ;;
+      coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} "" ;;
       status)
         if [ -f "$HOME/.config/mlx/api-key" ] && curl -sf --max-time 2 \
              -H "Authorization: Bearer $(cat "$HOME/.config/mlx/api-key")" \
@@ -758,7 +770,7 @@ And add the `serve_model` helper next to `sync_venv`:
 
 ```bash
     serve_model() {
-      local repo="$1" parser="$2"
+      local repo="$1" parser="$2" extra="''${3-}"
       local keyfile="$HOME/.config/mlx/api-key"
       if [ ! -f "$keyfile" ]; then
         echo "no API key at $keyfile -- create one with:" >&2
@@ -780,6 +792,7 @@ And add the `serve_model` helper next to `sync_venv`:
         --enable-prefix-cache --use-paged-cache \
         --kv-cache-quantization --kv-cache-quantization-bits 4 \
         --enable-auto-tool-choice --tool-call-parser "$parser" \
+        ''${extra:+$extra} \
         --offline
     }
 ```
