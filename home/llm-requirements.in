@@ -1,0 +1,12 @@
+# Top-level pins for the MLX stack. Compiled to llm-requirements.txt by
+# `uv pip compile` (see home/llm.nix, `llm lock`).
+#
+# These come from PyPI, NOT nixpkgs, and that is the whole point: nixpkgs
+# builds mlx with -DMLX_BUILD_METAL:BOOL=FALSE because Nix's sandbox cannot
+# reach Apple's closed-source `metal` compiler, so the nixpkgs build is
+# CPU-only. `mlx-metal` is a separate wheel and is the piece that carries the
+# Metal backend -- pinned explicitly rather than left to transitive resolution.
+mlx==0.32.1
+mlx-metal==0.32.1
+mlx-lm==0.31.3
+vllm-mlx==0.4.1
