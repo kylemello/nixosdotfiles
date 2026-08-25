@@ -149,6 +149,39 @@ Written from the numbers above, not from vendor claims.
   GGUF) and llama.cpp has open `qwen3_5` correctness bugs. Treat it as a
   contingency, not a workflow.
 
+## Measured: cost per turn under OpenCode
+
+The numbers above are raw generation speed. What actually matters for an agent
+loop is the round trip *including* OpenCode's own overhead — it sends a ~4.9K
+token system prompt plus 11 tool definitions on every turn, and re-sends the
+growing transcript each time.
+
+Identical request ("say the single word: ready") through all three:
+
+| Slot | Cold | Warm (prefix cache) |
+|---|---|---|
+| `agent` Qwen3.6-35B-A3B | 6.4s | **0.83s** |
+| `coder` Qwen3-Coder-30B-A3B | 7.5s | 6.7s |
+| `hard` Qwen3.8-27B | **40.0s** | — |
+
+**`llm hard` is not usable for OpenCode agent loops.** It is dense, so prefill
+of the system prompt alone dominates at ~127 tok/s against the MoE models'
+~340. Worse, its thinking mode routes output to `reasoning_content`, so nothing
+renders while it works — the session looks frozen, and OpenCode eventually
+gives up:
+
+```
+[stream_outputs] CancelledError after 0 tokens, 54.7s
+```
+
+That is not a bug; it is a dense 27B doing exactly what the bandwidth
+arithmetic predicts. Use `hard` for a deliberate one-shot question where you
+will wait, and drive OpenCode with `agent` or `coder`.
+
+**`agent` is the right default for OpenCode** — 0.83s warm is the only figure
+here that feels interactive, and it is the model with the best tool-use scores
+anyway.
+
 ## `HF_HUB_OFFLINE=1`, not `--offline`
 
 vllm-mlx's own `--offline` flag **fails to resolve models that are present in

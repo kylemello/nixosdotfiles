@@ -238,7 +238,12 @@ PY
         ;;
 
       coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} "" ;;
-      agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ${lib.escapeShellArg (if agentMllm then "--mllm" else "")} ;;
+      # --reasoning-parser qwen3 here too: Qwen3.6-35B-A3B also has a thinking
+      # mode, which I initially missed. Without it, an OpenCode reply came back
+      # as the answer, then a stray </think>, then the answer again. Caught by
+      # using it, not by the test suite -- the suite checks tool calls, not
+      # whether prose is clean.
+      agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ${lib.escapeShellArg ((if agentMllm then "--mllm " else "") + "--reasoning-parser qwen3")} ;;
       # --reasoning-parser qwen3: Qwen3.8 has a thinking mode, and without this
       # its <think> monologue leaks into message.content -- observed in an
       # OpenCode session, where the reply arrived wrapped in stray </think>
@@ -379,12 +384,18 @@ in
           apiKey = "{file:~/.config/mlx/api-key}";
         };
         models = {
-          "${coderRepo}" = { name = "Qwen3-Coder 30B A3B — fast coding"; tools = true; };
-          "${agentRepo}" = { name = "Qwen3.6 35B-A3B — agentic"; tools = true; };
-          # Qwen3.8 has a thinking mode; the server reports it and offers
-          # --reasoning-parser qwen3 to surface it separately. Not enabled on
-          # the server yet, so this only advertises the capability.
-          "${hardRepo}" = { name = "Qwen3.8 27B — hard problems"; tools = true; reasoning = true; };
+          # Names carry measured per-turn cost, because that is the thing you
+          # actually need at the moment you pick a model. Figures are for an
+          # OpenCode-shaped request (~4.9K-token system prompt + 11 tools).
+          "${coderRepo}" = { name = "Qwen3-Coder 30B — ~7s/turn, fast coding"; tools = true; };
+          "${agentRepo}" = { name = "Qwen3.6 35B-A3B — ~6s cold / <1s warm, BEST for agent loops"; tools = true; };
+          # ~40s per turn on the same request -- it is dense, so prefill of
+          # OpenCode's system prompt alone dominates. Combined with thinking
+          # mode (reasoning goes to reasoning_content, so nothing renders while
+          # it thinks) an agent loop looks hung and OpenCode eventually cancels:
+          #   [stream_outputs] CancelledError after 0 tokens, 54.7s
+          # Kept available for deliberate one-shot use; the name is the warning.
+          "${hardRepo}" = { name = "Qwen3.8 27B — SLOW ~40s/turn, one-shot only"; tools = true; reasoning = true; };
         };
       };
     };
