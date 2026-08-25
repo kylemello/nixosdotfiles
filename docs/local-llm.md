@@ -23,6 +23,12 @@ Verified — `libggml-metal.so` links `Metal.framework` and `MetalKit`.
 The venv lives at `~/.local/share/mlx-venv` and is reproduced from
 `home/llm-requirements.txt` by `llm sync`. `llm doctor` reports GPU health.
 
+The lockfile is compiled with `--generate-hashes` and `llm sync` runs with
+`--require-hashes`, so this pins **artifacts**, not just versions — a
+yanked-and-republished wheel fails loudly instead of silently changing the
+venv. That matters more than usual here: the whole stack exists to be a PHI
+boundary, and a version-only pin is the weakest link in that chain.
+
 ## The three models
 
 | Slot | Repo | Params | Parser | `--mllm` |
@@ -59,8 +65,10 @@ adds tool-parsing and transport overhead.
 Generation is **memory-bandwidth bound**, not compute bound: every token reads
 all *active* weights out of RAM once. The M4 Pro has 273 GB/s.
 
-- Qwen3.8-27B is dense: ~14 GiB read per token → ceiling ~19.5 tok/s. Measured
-  14.7, i.e. ~75% of the bus limit.
+- Qwen3.8-27B is dense: ~14 GiB read per token. 273 GB/s is 254.2 **GiB**/s,
+  so the ceiling is 254.2 ÷ 14 ≈ **18.2 tok/s**. Measured 14.7, i.e. ~81% of
+  the bus limit. (An earlier version of this file divided 273 by 14 without
+  converting units and got 19.5 / 75%.)
 - Qwen3-Coder is MoE: only ~3.3B of 30.5B params move per token, so it reads
   roughly 7× less and runs roughly 6× faster despite being larger on disk.
 
@@ -75,6 +83,10 @@ function and correctly-extracted arguments. Additionally verified on the coder:
 
 - multi-turn — consumed a `role: tool` result and answered from it
 - tool selection — picked `read_file` over `get_weather` from a two-tool menu
+
+All three were verified by hand on 2026-08-24. The committed regression suite
+only exercises whichever model happens to be loaded, so a passing run proves
+1 of 3, not 3 of 3 — re-verify by hand after a model or parser change.
 
 ## `--continuous-batching` is load-bearing, and its help text is wrong
 
@@ -116,7 +128,9 @@ That is exactly the mistake this project made once already.
 Practical read: a cold 40K context costs ~2 minutes. After that, every turn
 that shares the prefix is effectively free. The prefix cache holds ~3.1 GB and
 40K tokens consumed ~1.9 GB of it, so expect room for one or two large
-contexts before eviction.
+contexts before eviction. (The cache is memory-aware and sizes itself per run:
+the 8K measurement above logged a 2703 MB budget, the 40K one 3127 MB. Both are
+~20% of available RAM at the time, not a fixed figure.)
 
 ## Which model when
 
@@ -152,7 +166,19 @@ huggingface_hub's canonical switch, is honoured correctly, and is what
 ## PHI posture
 
 - Server binds `127.0.0.1` only. Verified: no off-loopback listeners.
-- Bearer auth enforced — no key → 401, wrong key → 401, correct key → 200.
+- Bearer auth enforced on the vllm-mlx server — no key → 401, wrong key → 401,
+  correct key → 200. (The regression suite covers the no-key and correct-key
+  cases; the wrong-key result was verified by hand.)
+- `llm long` starts `llama-server`, a *different* server on port 8080. It now
+  authenticates too, via `--api-key-file`, which is strictly better than the
+  vllm-mlx path — see the next bullet. Earlier revisions of this file claimed
+  blanket auth enforcement while `llm long` ran wide open; that was wrong.
+- **The key is visible in the process table for the vllm-mlx server.**
+  `vllm-mlx` accepts `--api-key` in argv only, with no env-var or file form, so
+  any same-user process can read it with `ps -ww` for as long as the server
+  runs. The 0600 file mode does not confine it once the server starts. This is
+  an upstream limitation, not a configuration choice. `llama-server` avoids it
+  (`--api-key-file`) and `llm long` uses that form.
 - Key at `~/.config/mlx/api-key`, mode 0600, never committed. The Nix store
   holds only the literal placeholder `{file:~/.config/mlx/api-key}`, which
   OpenCode resolves at runtime — store paths are world-readable and this repo
@@ -162,6 +188,21 @@ huggingface_hub's canonical switch, is honoured correctly, and is what
   configured there is nothing to fall back to. `share: "disabled"` stops
   transcript upload, which is the real egress path (there is no separate
   telemetry SDK in OpenCode).
+
+**Other network activity, for completeness.** `llm sync` and `llm lock` reach
+PyPI (97 wheels, ~1.3 GB). Model downloads reach HuggingFace. Both are setup
+operations, not inference, and `HF_HUB_OFFLINE=1` covers the serving path — but
+they belong in an honest egress inventory.
+
+`vllm-mlx` also ships an MCP client with stdio and SSE transports. It is inert
+here: it activates only via `--mcp-config`, `VLLM_MLX_MCP_CONFIG`, or
+`~/.config/vllm-mlx/mcp.{json,yaml}`, none of which exist. A stray config file
+would open an outbound path from inside the "no network during inference"
+boundary, so do not create one casually.
+
+**Data at rest is not covered by any of the above.** OpenCode persists session
+transcripts locally in plaintext, and the HF cache holds the weights. Egress
+controls do not encrypt anything on disk.
 
 **One caveat, stated plainly:** OpenCode's provider is declared as
 `npm = "@ai-sdk/openai-compatible"`, and on *first* use it fetches that package

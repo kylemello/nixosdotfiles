@@ -80,16 +80,38 @@ if [ -f "$KEYFILE" ]; then
 else
   bad "api key file exists" "$KEYFILE missing"
 fi
-# The key must never be committed -- this repo is public.
-if git -C "$(dirname "$0")/.." ls-files --error-unmatch .config/mlx/api-key >/dev/null 2>&1; then
-  bad "api key not tracked by git" "it is tracked"
+# The key must never be committed -- this repo is public. Search for the key's
+# CONTENT, not a guessed path: the previous version probed
+# <repo>/.config/mlx/api-key, which has never existed, so it could not detect
+# the key being committed under any real path.
+if [ -f "$KEYFILE" ]; then
+  if git -C "$(dirname "$0")/.." grep -qF -- "$(cat "$KEYFILE")" 2>/dev/null; then
+    bad "api key not committed" "key content found in tracked files"
+  else
+    ok "api key not committed"
+  fi
 else
-  ok "api key not tracked by git"
+  skip "api key not committed" "no key file to search for"
 fi
 # Nothing may listen off-loopback.
-check "no off-loopback llm listeners" \
-  "$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -Ei 'vllm|mlx|llama' | grep -cv '127\.0\.0\.1' | tr -d ' ')" \
-  "0"
+#
+# Target the PORT, not the process name. The previous version of this check
+# grepped `lsof` output for 'vllm|mlx|llama' -- but lsof truncates COMMAND to 9
+# characters and the server renders as "python3.1", so NO field on the line
+# ever matched. The pre-filter emptied the pipeline, `grep -cv` printed 0, and
+# the check passed with 25 live listeners present, with no server running, and
+# would have passed with a server bound to 0.0.0.0. It was structurally
+# incapable of failing, while being the sole evidence for the PHI claim
+# "binds 127.0.0.1 only".
+for p in 8000 8080; do
+  LISTEN_ADDRS="$(lsof -nP -iTCP:"$p" -sTCP:LISTEN -Fn 2>/dev/null | grep '^n' | sed 's/^n//')"
+  if [ -z "$LISTEN_ADDRS" ]; then
+    skip "no off-loopback listener on :$p" "nothing listening"
+  else
+    check "no off-loopback listener on :$p" \
+      "$(printf '%s\n' "$LISTEN_ADDRS" | grep -cvE '^(127\.0\.0\.1|\[::1\]):' | tr -d ' ')" "0"
+  fi
+done
 
 echo
 echo "== Task 4: llm command =="
@@ -140,10 +162,10 @@ have llama-server
 # mlx/ollama, llama.cpp JIT-compiles its Metal shaders at runtime.
 if command -v llama-server >/dev/null 2>&1; then
   BUILD="$(llama-server --version 2>&1 |  grep -oE 'build [0-9]+' | grep -oE '[0-9]+' | head -1)"
-  if [ -n "$BUILD" ] && [ "$BUILD" -ge 5100 ]; then
-    ok "llama-server build $BUILD >= 5100 (qwen3-moe floor)"
+  if [ -n "$BUILD" ] && [ "$BUILD" -ge 10353 ]; then
+    ok "llama-server build $BUILD >= 10353"
   else
-    bad "llama-server build >= 5100" "got [${BUILD:-none}]"
+    bad "llama-server build >= 10353" "got [${BUILD:-none}]"
   fi
 fi
 
@@ -167,6 +189,17 @@ if [ -f "$KEYFILE" ] && curl -sf --max-time 2 -H "Authorization: Bearer $(cat "$
         \"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}],
       \"stream\":false}" | jq -r '.choices[0].message.tool_calls[0].function.name // "none"')"
   check "[live] tool call parsed for $SERVED" "$TC" "read_file"
+
+  # Run LAST, and only here: `llm stop` terminating a real server was
+  # previously covered in neither mode -- skipped while one was live, and only
+  # the no-op path exercised while none was. `pkill -f 'vllm-mlx serve'` is the
+  # most breakage-prone line in the module (an upstream rename or a
+  # setproctitle call would silently break eviction) and had zero coverage.
+  llm stop >/dev/null 2>&1
+  sleep 2
+  /usr/bin/pgrep -f 'vllm-mlx serve' >/dev/null 2>&1 \
+    && bad "[live] llm stop kills a running server" "still running after stop" \
+    || ok "[live] llm stop kills a running server"
 else
   skip "[live] server checks" "no vllm-mlx running; start one with 'llm coder'"
 fi

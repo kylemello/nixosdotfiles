@@ -17,8 +17,9 @@
 #
 # THE TRADEOFF: this leaves pure Nix. The venv is materialized by uv and will
 # not rebuild from the flake. What stays declarative is the specification --
-# llm-requirements.txt is compiled, committed, and `llm sync` reproduces the
-# venv from it exactly. `llm doctor` reports drift between the two.
+# llm-requirements.txt is compiled WITH HASHES, committed, and `llm sync`
+# reproduces the venv from it exactly (--require-hashes pins artifacts, not
+# merely versions). `llm doctor` reports GPU health.
 #
 # Darwin-only by construction: MLX is Metal.
 let
@@ -57,7 +58,7 @@ let
 
   llm = pkgs.writeShellScriptBin "llm" ''
     set -euo pipefail
-    export PATH="${lib.makeBinPath (with pkgs; [ uv curl coreutils jq gnugrep llama-cpp ])}:$PATH"
+    export PATH="${lib.makeBinPath (with pkgs; [ uv curl coreutils jq llama-cpp ])}:$PATH"
 
     VENV="${venv}"
     LOCK="${reqLock}"
@@ -72,8 +73,25 @@ let
         uv venv --python 3.12 "$VENV"
       fi
       echo "syncing from $LOCK" >&2
-      VIRTUAL_ENV="$VENV" uv pip sync --python "$VENV/bin/python" "$LOCK"
+      # --require-hashes: the lockfile is compiled with --generate-hashes, so
+      # this pins artifacts and not merely versions. A yanked-and-republished
+      # wheel then fails loudly instead of silently changing the venv.
+      VIRTUAL_ENV="$VENV" uv pip sync --require-hashes --python "$VENV/bin/python" "$LOCK"
       echo "venv ready" >&2
+    }
+
+    # SIGTERM on a process holding 16-19 GiB of wired GPU memory against a
+    # 37.4 GiB budget does not always release inside a fixed sleep. Poll, then
+    # escalate -- otherwise `llm coder` straight after `llm hard` allocates on
+    # top of the outgoing process and hits memory pressure.
+    evict_server() {
+      /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
+      for _ in $(seq 30); do
+        /usr/bin/pgrep -f 'vllm-mlx serve' >/dev/null 2>&1 || return 0
+        sleep 1
+      done
+      /usr/bin/pkill -9 -f 'vllm-mlx serve' 2>/dev/null || true
+      sleep 2
     }
 
     require_key() {
@@ -96,8 +114,7 @@ let
       # is Linux-only (meta.platforms has no darwin), so adding it would fail
       # the build on the one machine this module targets. macOS ships pkill and
       # this module is darwin-gated.
-      /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
-      sleep 1
+      evict_server
       echo "serving $repo (parser: $parser) on 127.0.0.1:$PORT" >&2
       #
       # --continuous-batching is LOAD-BEARING and its own --help lies about it.
@@ -137,7 +154,7 @@ let
           echo "  e.g. llm lock ~/nixosdotfiles/home/llm-requirements.txt" >&2
           exit 1
         fi
-        uv pip compile --python-version 3.12 "$REQ_IN" -o "$out"
+        uv pip compile --generate-hashes --python-version 3.12 "$REQ_IN" -o "$out"
         ;;
       doctor)
         if [ ! -x "$VENV/bin/python" ]; then
@@ -178,7 +195,7 @@ PY
       stop)
         # Idempotent by contract: nothing running is the normal state after a
         # reboot, and tests/llm.test.sh asserts exit 0 in that case.
-        /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
+        evict_server
         echo "stopped" >&2
         ;;
 
@@ -196,12 +213,22 @@ PY
           echo "usage: llm long <path-to.gguf>" >&2
           exit 1
         fi
-        /usr/bin/pkill -f 'vllm-mlx serve' 2>/dev/null || true
+        require_key
+        evict_server
+        # --api-key-file, not --api-key: llama-server supports reading the key
+        # from a file, which keeps it out of the process table. vllm-mlx has no
+        # equivalent and takes it in argv -- see the PHI note in docs/local-llm.md.
+        #
+        # `--flash-attn on`, not bare `--flash-attn`: as of build 10408 the flag
+        # takes an [on|off|auto] value and a bare form swallows the NEXT
+        # argument, failing with
+        #   error: unknown value for --flash-attn: '--n-gpu-layers'
         exec llama-server \
           --model "$gguf" \
           --host 127.0.0.1 --port 8080 \
+          --api-key-file "$KEYFILE" \
           --ctx-size 131072 \
-          --flash-attn \
+          --flash-attn on \
           --n-gpu-layers 99 \
           --jinja
         ;;
