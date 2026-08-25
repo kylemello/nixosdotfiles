@@ -219,9 +219,23 @@ llm agent     # tool use, agentic loops          ~59 tok/s
 llm hard      # best quality, thinking mode      ~15 tok/s
 llm long f.gguf   # llama.cpp, prompts >60K
 llm status    # what is loaded + prefix-cache hit stats
+llm logs      # follow the server log
 llm stop      # tear down, free the memory
 llm doctor    # venv health, GPU check
 ```
+
+**The serving commands detach and return.** `llm hard` hands the prompt back in
+~8s once the model answers, so the next thing you type can be `opencode` in the
+same shell. Add `--foreground` / `-F` to keep one attached for debugging.
+Re-running the same slot is a no-op (~0.04s) rather than a 15 GiB reload;
+switching slots evicts the old model and waits for the memory back before
+loading the new one.
+
+Qwen3.8 is served with `--reasoning-parser qwen3`. Without it, its thinking
+mode leaks `<think>` monologue into `message.content` — observed in a real
+OpenCode session, where a reply came back wrapped in stray `</think>` tags.
+With it, reasoning lands in `message.reasoning_content` and `content` holds
+only the answer. The other two models have no thinking mode and do not get it.
 
 Then point OpenCode at it:
 

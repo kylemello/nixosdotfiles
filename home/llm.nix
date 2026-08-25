@@ -29,6 +29,7 @@ let
 
   port = "8000";
   keyFile = "$HOME/.config/mlx/api-key";
+  logFile = "\${XDG_STATE_HOME:-$HOME/.local/state}/mlx/server.log";
 
   # Three models, one loaded at a time -- ~16-19 GiB of weights each against a
   # 37.4 GiB GPU working set, so two will not co-reside. Parsers and the --mllm
@@ -65,6 +66,7 @@ let
     REQ_IN="${reqIn}"
     KEYFILE="${keyFile}"
     PORT="${port}"
+    LOGFILE="${logFile}"
 
     sync_venv() {
       if [ ! -x "$VENV/bin/python" ]; then
@@ -102,12 +104,39 @@ let
       fi
     }
 
+    # Already up with the wanted model? No-op rather than restart -- reloading
+    # 16-19 GiB to answer a question a curl already answered is a wasted minute.
+    already_serving() {
+      local repo="$1"
+      [ -f "$KEYFILE" ] || return 1
+      curl -sf --max-time 2 -H "Authorization: Bearer $(cat "$KEYFILE")" \
+        "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
+        | jq -e --arg r "$repo" 'any(.data[]?; .id == $r)' >/dev/null 2>&1
+    }
+
+    wait_ready() {
+      local i
+      for i in $(seq 1 150); do
+        sleep 2
+        curl -sf --max-time 2 -H "Authorization: Bearer $(cat "$KEYFILE")" \
+          "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && return 0
+        # Bail early if it died, rather than burning the full five minutes.
+        /usr/bin/pgrep -f 'vllm-mlx serve' >/dev/null 2>&1 || return 1
+      done
+      return 1
+    }
+
     serve_model() {
       local repo="$1" parser="$2" extra="''${3-}"
       require_key
       if [ ! -x "$VENV/bin/vllm-mlx" ]; then
         echo "venv missing -- run: llm sync" >&2
         exit 1
+      fi
+
+      if already_serving "$repo"; then
+        echo "$repo already serving on http://127.0.0.1:$PORT" >&2
+        return 0
       fi
       # Only one model fits at a time. Evict whatever is running first.
       # /usr/bin/pkill by absolute path, NOT via makeBinPath: nixpkgs' `procps`
@@ -136,14 +165,49 @@ let
       # huggingface_hub's canonical switch, is honoured correctly, and is the
       # PHI guarantee that no weight fetch happens during inference.
       export HF_HUB_OFFLINE=1
-      exec "$VENV/bin/vllm-mlx" serve "$repo" \
+
+      # DETACHED BY DEFAULT. The point of this command is to hand back a usable
+      # prompt so the next thing you type can be `opencode`. An exec'd server
+      # that owns the terminal makes that awkward for no benefit.
+      # `llm <slot> --foreground` keeps it attached for debugging.
+      set -- "$VENV/bin/vllm-mlx" serve "$repo" \
         --host 127.0.0.1 --port "$PORT" \
         --api-key "$(cat "$KEYFILE")" \
         --enable-prefix-cache --continuous-batching \
         --kv-cache-quantization --kv-cache-quantization-bits 4 \
         --enable-auto-tool-choice --tool-call-parser "$parser" \
         ''${extra:+$extra}
+
+      if [ "$FOREGROUND" = "1" ]; then
+        exec "$@"
+      fi
+
+      mkdir -p "$(dirname "$LOGFILE")"
+      nohup "$@" > "$LOGFILE" 2>&1 &
+      disown 2>/dev/null || true
+
+      if wait_ready; then
+        echo "ready: $repo" >&2
+        echo "  endpoint  http://127.0.0.1:$PORT" >&2
+        echo "  opencode  opencode run --model mlx/$repo \"...\"" >&2
+        echo "  logs      llm logs        stop: llm stop" >&2
+        return 0
+      fi
+      echo "server did not come up. tail of $LOGFILE:" >&2
+      tail -15 "$LOGFILE" >&2
+      return 1
     }
+
+    # Strip --foreground/-F from anywhere in argv before dispatch.
+    FOREGROUND=0
+    ARGS=()
+    for a in "$@"; do
+      case "$a" in
+        --foreground|-F) FOREGROUND=1 ;;
+        *) ARGS+=("$a") ;;
+      esac
+    done
+    set -- "''${ARGS[@]+"''${ARGS[@]}"}"
 
     case "''${1-}" in
       sync) sync_venv ;;
@@ -175,7 +239,13 @@ PY
 
       coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} "" ;;
       agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ${lib.escapeShellArg (if agentMllm then "--mllm" else "")} ;;
-      hard)  serve_model ${lib.escapeShellArg hardRepo}  ${lib.escapeShellArg hardParser}  "" ;;
+      # --reasoning-parser qwen3: Qwen3.8 has a thinking mode, and without this
+      # its <think> monologue leaks into message.content -- observed in an
+      # OpenCode session, where the reply arrived wrapped in stray </think>
+      # tags. With it, reasoning is split into message.reasoning_content and
+      # content holds just the answer. The other two models have no thinking
+      # mode and must not get it.
+      hard)  serve_model ${lib.escapeShellArg hardRepo}  ${lib.escapeShellArg hardParser}  "--reasoning-parser qwen3" ;;
 
       status)
         if [ -f "$KEYFILE" ] && curl -sf --max-time 2 \
@@ -190,6 +260,11 @@ PY
         else
           echo "vllm-mlx not running"
         fi
+        ;;
+
+      logs)
+        [ -f "$LOGFILE" ] || { echo "no log at $LOGFILE" >&2; exit 1; }
+        tail -f "$LOGFILE"
         ;;
 
       stop)
@@ -243,8 +318,12 @@ usage: llm <command>
     hard     Qwen3.8-27B          best quality, thinking mode   ~15 tok/s
     long     <file.gguf>          llama.cpp, for >60K prompts
 
+  Serving commands DETACH and return once the model answers, so the next
+  thing you type can be opencode. Add --foreground/-F to keep one attached.
+
   lifecycle
     status   what is loaded, plus prefix-cache hit stats
+    logs     follow the server log
     stop     tear down the server and free the memory
 
   venv

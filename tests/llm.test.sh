@@ -116,7 +116,7 @@ done
 echo
 echo "== Task 4: llm command =="
 LLM_HELP="$(llm 2>&1 || true)"
-for sub in sync lock doctor coder agent hard long status stop; do
+for sub in sync lock doctor coder agent hard long status logs stop; do
   case "$LLM_HELP" in
     *"$sub"*) ok "llm usage mentions '$sub'" ;;
     *) bad "llm usage mentions '$sub'" "usage was: ${LLM_HELP:0:160}" ;;
