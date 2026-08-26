@@ -86,6 +86,14 @@
               modules = [ ./users/kyle/ariane.nix ];
               extraSpecialArgs = { inherit inputs; };
             };
+            # Arch/Omarchy Hyprland desktop (x86_64-linux). Nix owns the CLI
+            # toolchain and the shared dotfiles; Omarchy keeps the desktop, the
+            # theming and its own neovim — see home/omarchy.nix.
+            "omarchy" = home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [ ./users/kyle/omarchy.nix ];
+              extraSpecialArgs = { inherit inputs; };
+            };
           };
         };
 

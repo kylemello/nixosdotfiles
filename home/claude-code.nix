@@ -10,13 +10,13 @@
 # The `claude-code` package itself is installed via home/packages/misc.nix.
 let
   # Added only on the machines that actually drive Claude Code interactively
-  # (kyle.claude.enable — artemis and ariane), which keeps atlas/gateway/nixosvm
-  # byte-identical while still ending the per-machine drift these servers had
-  # accumulated: as measured 2026-07-28 they had been added with `claude mcp add`
-  # and each lived on exactly one machine (git/kubernetes/atlassian-aegis on
-  # artemis, teams-mcp on ariane). All are portable — `uvx` comes from `uv` and
-  # `npx` from `nodejs_24`, both in home/packages/dev.nix, and the rest are plain
-  # URLs.
+  # (kyle.claudeCode.enable — artemis, ariane and omarchy), which keeps
+  # atlas/gateway/nixosvm byte-identical while still ending the per-machine drift
+  # these servers had accumulated: as measured 2026-07-28 they had been added
+  # with `claude mcp add` and each lived on exactly one machine
+  # (git/kubernetes/atlassian-aegis on artemis, teams-mcp on ariane). All are
+  # portable — `uvx` comes from `uv` and `npx` from `nodejs_24`, both in
+  # home/packages/dev.nix, and the rest are plain URLs.
   #
   # Declaring a server does NOT authenticate it: `atlassian-aegis` still needs one
   # interactive `/mcp` -> authenticate -> pick the `aegistherapies` site, once per
@@ -77,7 +77,7 @@ let
     };
   };
 
-  mcpServers = lib.optionalAttrs config.kyle.claude.enable workstationServers;
+  mcpServers = lib.optionalAttrs config.kyle.claudeCode.enable workstationServers;
 
   # Claude Code refuses to PERSIST the trust decision when its cwd is exactly the
   # home directory. The accept handler branches on `os.homedir() === cwd()` and,
@@ -100,9 +100,9 @@ let
   # ~/personal were already trusted individually, so what this really widens is
   # newly-cloned paths.
   #
-  # Gated on kyle.claude.enable, like workstationServers above, so
+  # Gated on kyle.claudeCode.enable, like workstationServers above, so
   # atlas/gateway/nixosvm — which nobody drives Claude Code from — keep the prompt.
-  homeTrust = lib.optionalAttrs config.kyle.claude.enable {
+  homeTrust = lib.optionalAttrs config.kyle.claudeCode.enable {
     projects.${config.home.homeDirectory}.hasTrustDialogAccepted = true;
   };
 
@@ -114,16 +114,40 @@ let
   desired = builtins.toJSON ({ inherit mcpServers; } // homeTrust);
 in
 {
-  # For config.kyle.claude.enable above. Imported here as well as from the user
-  # profiles so this module is self-contained; the module system dedupes by path.
+  # For the kyle.claudeCode.enable default below. Imported here as well as from
+  # the user profiles so this module is self-contained; the module system dedupes
+  # by path.
   imports = [ ./claude.nix ];
 
+  options.kyle.claudeCode.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = config.kyle.claude.enable;
+    defaultText = lib.literalExpression "config.kyle.claude.enable";
+    description = ''
+      Whether to declare the user-scope MCP servers and the home-directory trust
+      flag in ~/.claude.json.
+
+      Defaults to kyle.claude.enable, which is what this module used to test
+      directly — so artemis, ariane and the three headless NixOS hosts are
+      unaffected by this option existing. It is split out for home/omarchy.nix,
+      where the two halves genuinely come apart: that machine drives Claude Code
+      interactively and wants these servers, but canNOT take the ~/.claude
+      symlinks, because Omarchy ships its own skills in ~/.claude/skills
+      (omarchy, diagnose-crash) that the repo's tree does not contain and the
+      symlink would hide.
+    '';
+  };
+
+  # Declaring `options` above means every configuration attribute has to live
+  # inside an explicit `config`, or the module system rejects the whole file with
+  # "unsupported attribute `home'".
+  #
   # ~/.claude.json is a mutable file Claude Code owns at runtime, so we can't render it
   # with home.file (that would clobber its state). Instead, idempotently deep-merge our
   # declared slices into it on each activation. `jq`'s `*` recursively merges objects,
   # so existing keys survive and ours are added/refreshed — including the single key
   # homeTrust adds under an existing projects[~] entry, which keeps its siblings.
-  home.activation.claudeCodeJson =
+  config.home.activation.claudeCodeJson =
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       claudeJson="$HOME/.claude.json"
       desired='${desired}'
