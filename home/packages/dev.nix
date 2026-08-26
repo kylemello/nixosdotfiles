@@ -31,6 +31,7 @@
     glab
     gnumake
     go
+    google-cloud-sdk
     infisical
     infracost
     jdk

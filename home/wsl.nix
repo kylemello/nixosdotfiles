@@ -1,5 +1,11 @@
-{ config, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 
+let
+  # C:\Users\kylem\.ssh\config — the file every ssh.exe on this box already
+  # reads. Hardcoded the same way as the sessionPath entries and op-ssh-sign
+  # below: this module only ever evaluates on artemis.
+  windowsSshConfig = "/mnt/c/Users/kylem/.ssh/config";
+in
 {
   # Alias common SSH commands to their Windows executable counterparts.
   # This is crucial for interoperability with Windows-based SSH agents.
@@ -40,6 +46,52 @@
     };
   };
 
+  # ~/.ssh/config IS the Windows one. Everything on this host that matters
+  # already reaches ssh through `ssh.exe` — the aliases above, and git via
+  # core.sshCommand — and ssh.exe reads C:\Users\kylem\.ssh\config natively,
+  # so the Windows file is the single source of truth for host aliases. This
+  # points Nix's openssh at that same file, so `command ssh`, ansible, rsync
+  # and anything else that bypasses the alias resolve the same host names.
+  #
+  # mkOutOfStoreSymlink, not a store copy: the file is edited on the Windows
+  # side and has to take effect there without a rebuild here.
+  #
+  # Only `config`, never the whole ~/.ssh directory. wip's hub key
+  # (~/.ssh/wip_hub_ed25519, see kyle.wip below) has to stay on the ext4 side:
+  # a private key under /mnt/c inherits drvfs's 0777 and OpenSSH refuses to
+  # load it at all.
+  #
+  # The Windows file's first line is `Include ~/.ssh/1Password/config`, which
+  # from here resolves to /home/kyle/.ssh/1Password/config and does not exist.
+  # OpenSSH ignores an Include matching nothing, so this is harmless (verified
+  # 2026-08-25) — it does mean Nix's ssh gets no 1Password keys, which it does
+  # not need: that agent lives on the Windows side and only ssh.exe reaches it.
+  home.file.".ssh/config".source =
+    config.lib.file.mkOutOfStoreSymlink windowsSshConfig;
+
+  # OpenSSH fatals on a group- or world-writable user config:
+  #
+  #   Bad owner or permissions on /home/kyle/.ssh/config
+  #
+  # and drvfs hands out 0777, which is exactly that — so without this chmod
+  # the symlink above breaks EVERY Nix-side ssh on the host, wip's hub sync
+  # included. /mnt/c is mounted with `metadata` (/etc/wsl.conf), so the mode
+  # sticks in an NTFS extended attribute; Windows and ssh.exe never consult
+  # POSIX modes, so nothing on that side notices. Verified 2026-08-25.
+  #
+  # The attribute is lost if a Windows editor replaces the file instead of
+  # writing it in place (save-to-temp-then-rename). That failure is loud, and
+  # this re-applies on every activation, so the fix is a rebuild — or a plain
+  # `chmod go-w` from WSL.
+  home.activation.windowsSshConfigPerms =
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      if [ -e ${lib.escapeShellArg windowsSshConfig} ]; then
+        $DRY_RUN_CMD chmod go-w ${lib.escapeShellArg windowsSshConfig}
+      else
+        echo "wsl: ${windowsSshConfig} is missing — ~/.ssh/config will dangle" >&2
+      fi
+    '';
+
   # Paths backed by the Windows filesystem. These exist on artemis only; they
   # cannot cross to macOS, and they must never enter a sync root.
   #
@@ -55,7 +107,8 @@
   # skipped. Do not add -L to that find without excluding this path first.
   #
   # home/folders.nix creates ~/personal ~/work ~/notes ~/scratch as real
-  # directories on every machine; nothing above is recreated declaratively.
+  # directories on every machine; nothing in the list above is recreated
+  # declaratively. ~/.ssh/config, just above, is the one that IS.
 
   # Logical host name for `wip` refs. See home/wip.nix. Enabled HERE and not in
   # users/kyle/home.nix, which all four NixOS hosts import.
