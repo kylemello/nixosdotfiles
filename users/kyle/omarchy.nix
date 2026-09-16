@@ -9,6 +9,7 @@
   imports = [
     # Shared with every other machine.
     ../../home/fish.nix
+    ../../home/q.nix
     ../../home/folders.nix
     ../../home/git.nix
     ../../home/tmux.nix
