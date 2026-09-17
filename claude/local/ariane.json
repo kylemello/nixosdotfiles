@@ -15,5 +15,11 @@
     "mycare": {
       "source": { "source": "directory", "path": "/Users/kyle/work/mycaredev.claudeskills" }
     }
+  },
+  "prefersReducedMotion": true,
+  "permissions": {
+    "allow": [
+      "Bash(git fetch *)"
+    ]
   }
 }

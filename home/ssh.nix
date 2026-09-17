@@ -29,10 +29,9 @@
       # =======================
       # Friend Hosts
       # =======================
-      Host cdbits
-        HostName cdbits.xyz
-        User kmello
-        Port 2520
+      Host gitea.cdbits.dev
+        HostName gitea.cdbits.dev
+        User git
 
       # =======================
       # Home Hosts

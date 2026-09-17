@@ -5,6 +5,18 @@
     "sessionUrl": false
   },
   "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "Bash(podman ps:*)",
+      "Bash(podman rm *)",
+      "Bash(podman stop *)",
+      "Bash(podman volume *)",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "defaultMode": "auto"
+  },
+  "model": "sonnet",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -17,18 +29,6 @@
       }
     ]
   },
-  "permissions": {
-    "allow": [
-      "Bash(podman ps:*)",
-      "Bash(podman rm *)",
-      "Bash(podman stop *)",
-      "Bash(podman volume *)",
-      "WebFetch",
-      "WebSearch"
-    ],
-    "defaultMode": "auto"
-  },
-  "model": "opus[1m]",
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
     "ui-ux-pro-max@ui-ux-pro-max-skill": true,

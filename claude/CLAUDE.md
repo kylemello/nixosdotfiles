@@ -66,3 +66,15 @@ Say "I didn't verify X" rather than quietly omitting X. Vagueness is not brevity
   a change looks. Make the change, then hand off to the user for the visual check.
 - Non-visual verification is still expected: run typecheck / lint / tests / build
   as appropriate and report the results.
+
+## Waiting and timeouts
+- Don't burn wall-clock waiting. No `sleep`, no poll loops, no re-checking a
+  thing that already told you it finished. Run it, read the result, move on.
+- Background work wakes you when it exits. Start it and do something else
+  instead of sitting on it.
+- Set a command's timeout to what it actually needs, not the maximum. A hung
+  command should fail fast, not stall for minutes.
+- If a wait is genuinely unavoidable — a service that must be up before the
+  next step, a build with no completion signal — say so *before* it, naming
+  what you're waiting on and for how long: "Waiting 30s for the MLX server to
+  load weights." Same for a retry: say why the first wait wasn't enough.
