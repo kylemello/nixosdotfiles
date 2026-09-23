@@ -21,6 +21,14 @@ Before writing, staging, or committing anything:
 - Non-secret but publicly visible recon surface already in here, which is accepted: internal hostnames (`gitea`/`ha`/`mcp`/`lan.kmello.dev`), private IPs, `gateway`'s SSH port 422, Syncthing device IDs, both email addresses, authorized SSH public keys. Don't add *more* of this than a change needs, and don't paste new internal URLs, ticket contents, or work data into comments.
 - Anything genuinely secret that reaches a commit is **compromised, not fixable by a follow-up commit**: say so immediately and rotate the credential. History rewriting is the user's call, never a silent cleanup.
 
+## Commit and push every change
+
+**Every change to this repo gets committed and pushed to `origin/master` as soon as it is done and verified.** Standing authorization, no need to ask first. Don't leave work sitting in the working tree: artemis and ariane both push here, so anything left unpushed on one machine turns into a rebase conflict on the other.
+
+- Rebase first, never merge: `git fetch && git rebase origin/master`, then `git push`. Never force-push `master`.
+- One commit per logical change, and stage paths explicitly. Everything in the public-repo section above still applies to every push.
+- `claude/skills/synced/` is Claude Code's org skill sync. Leave it untracked and never commit it.
+
 ## Common commands
 
 ```fish
