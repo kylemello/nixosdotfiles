@@ -7,6 +7,7 @@
     ../../home/folders.nix
     ../../home/git.nix
     ../../home/tmux.nix
+    ../../home/psmux.nix
     ../../home/catppuccin.nix
     ../../home/claude-code.nix
     ../../home/k9s.nix

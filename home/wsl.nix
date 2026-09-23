@@ -198,4 +198,9 @@ in
   # Desktop's WSL integration — and the open-webui stack points at the ollama
   # server hosts/wsl.nix runs on this machine.
   kyle.dockerComposes.enable = true;
+
+  # C:\Users\kylem\.psmux.conf, the Windows-side tmux, kept in step with
+  # home/tmux.nix. Enabled HERE because artemis is the only host with a
+  # Windows side to write it to — see home/psmux.nix.
+  kyle.psmux.enable = true;
 }
