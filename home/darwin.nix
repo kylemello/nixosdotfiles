@@ -1,9 +1,8 @@
 { config, lib, pkgs, ... }:
 
 let
-  # See home.packages below. The SDK is a superset of the runtime Storage
-  # Explorer actually needs; swap in dotnetCorePackages.runtime_10_0 to drop
-  # the `dotnet` CLI and most of the closure.
+  # Must stay the same derivation home/packages/dev.nix installs, so the
+  # DOTNET_ROOT below and the `dotnet` on PATH cannot drift apart.
   dotnet = pkgs.dotnetCorePackages.sdk_10_0;
   dotnetRoot = "${dotnet}/share/dotnet";
 in
@@ -103,15 +102,12 @@ in
     host = "ariane";
   };
 
-  # .NET 10, for Microsoft Azure Storage Explorer. Here rather than in the
-  # shared home/packages/dev.nix because only this machine runs that app, and
-  # the SDK is a 1.3GB closure the Linux hosts have no use for.
-  #
-  # Storage Explorer 1.45 ships a ServiceHub host under
+  # The SDK itself comes from the shared home/packages/dev.nix; what follows is
+  # the extra wiring Microsoft Azure Storage Explorer needs, which only this
+  # machine runs. Storage Explorer 1.45 ships a ServiceHub host under
   # Contents/Resources/app/ServiceHub/Hosts/microsoft-servicehub-host whose
   # runtimeconfig.json asks for Microsoft.NETCore.App 10.0.0. With no runtime
   # present it dies with "You must install .NET to run this application".
-  home.packages = [ dotnet ];
 
   # For shells. Note this does NOT help Storage Explorer: that apphost never
   # consults PATH, and a Finder-launched GUI inherits launchd's environment

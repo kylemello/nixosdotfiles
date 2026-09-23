@@ -14,6 +14,10 @@
     devenv
     docker-buildx
     dolt
+    # Plain `dotnet-sdk` is still pinned to 8.0 LTS in nixpkgs, so name the
+    # version. ariane already had this for Azure Storage Explorer and keeps the
+    # DOTNET_ROOT wiring it needs in home/darwin.nix.
+    dotnetCorePackages.sdk_10_0
     # withMailutils only buys emacs `movemail`, and mailutils 3.21 no longer
     # links on aarch64-darwin: libmu_sieve's uidnew extension leaves
     # mu_url_{set_scheme,sget_path,to_string} undefined, which the macOS linker
