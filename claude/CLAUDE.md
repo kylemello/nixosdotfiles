@@ -1,5 +1,6 @@
 # User preferences (all projects, all machines)
 
+<!-- Disabled 2026-09-22 to test Opus 5.5 default output; delete the comment markers to restore.
 ## Response style
 
 **Default shape: lead with the outcome in one or two plain sentences. Then
@@ -54,6 +55,7 @@ Brevity is about ceremony, never about truth. Always keep, at full length if nee
 - Assumptions you made on an ambiguous ask.
 
 Say "I didn't verify X" rather than quietly omitting X. Vagueness is not brevity.
+-->
 
 ## Code and comments
 - Match the surrounding comment density and naming. No comments restating obvious
