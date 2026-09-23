@@ -50,6 +50,39 @@ let
       type = "http";
       url = "https://ha.kmello.dev/api/mcp";
     };
+    notion-personal = {
+      # Notion's own hosted remote MCP server, for the PERSONAL workspace. The
+      # WORK workspace is the claude.ai `Notion` connector, an account-level
+      # integration on the Anthropic side that is not configurable from here.
+      #
+      # ⚠️ Deliberately the legacy SSE endpoint, not Streamable HTTP at /mcp.
+      # Claude Code de-duplicates connectors BY URL: while this server pointed
+      # at https://mcp.notion.com/mcp, /mcp reported
+      #
+      #   claude.ai Notion · hidden — same URL as your server 'notion-personal'
+      #   To use this connector instead, run claude mcp remove notion-personal
+      #
+      # i.e. declaring it here silently suppressed the work connector, and only
+      # one of the two could ever be live. /sse is a genuinely different URL
+      # (verified 2026-08-31: /mcp and /sse both answer 401, /v1/mcp is 404), so
+      # the two stop colliding and both appear. The same collision is still
+      # active between `claude.ai Microsoft Learn MCP` and the
+      # plugin:microsoft-docs server — left alone, the plugin wins.
+      #
+      # If Notion retires SSE, the fallback is to drop this block entirely and
+      # let the claude.ai connector serve whichever single workspace it is
+      # granted; there is no way to have two grants at one URL.
+      #
+      # Unlike home-assistant, this one DOES work with `/mcp` -> authenticate:
+      # the RFC 8414 authorization server metadata is well-formed and dynamic
+      # client registration is open (verified 2026-08-30), so no token is needed
+      # and nothing secret lands in this file. At the consent screen, sign in
+      # with the PERSONAL account and grant the personal workspace — the grant is
+      # per-server and does not touch the work connector. Changing the URL
+      # invalidates the old grant, so this needs one re-authentication per host.
+      type = "sse";
+      url = "https://mcp.notion.com/sse";
+    };
     git = {
       type = "stdio";
       command = "uvx";
