@@ -252,10 +252,14 @@
     };
   };
 
-  # Local coding model on the card. ollama-cuda is NOT on cache.nixos.org —
-  # nixpkgs does not redistribute binaries built against the CUDA toolkit — so
-  # this was built locally: `nix build --dry-run` reported 18 derivations to
-  # build and nothing substitutable.
+  # Local coding model on the card. `ollama-cuda` here is NOT nixpkgs' — it is
+  # overlays/ollama.nix, which unpacks upstream's prebuilt Linux release. nixpkgs
+  # does not redistribute binaries built against the CUDA toolkit, so its
+  # ollama-cuda is on no substituter (cuda-maintainers.cachix.org now 401s too)
+  # and every `nix flake update` that moved nixpkgs recompiled the ggml CUDA
+  # kernels before this host could switch. The overlay is pinned in
+  # overlays/_sources/ollama.json and bumped by `nix run .#update-overlays`, so
+  # nothing is built here any more.
   #
   # `services.ollama.acceleration` is retired in this nixpkgs and setting it is
   # a hard eval error, so the package is named directly instead.
@@ -293,6 +297,15 @@
       # ollama finds no device — same libdxcore dlopen reason as everything
       # else in this section.
       LD_LIBRARY_PATH = "/usr/lib/wsl/lib";
+
+      # Upstream's build ships a Vulkan ggml backend that nixpkgs' did not, and
+      # WSL's D3D12 layer makes the 5090 show up through it as a second
+      # "inference compute" device next to CUDA0. Measured on 0.34.2: unset,
+      # discovery reports both Vulkan0 and CUDA0 for the one card; "0" leaves
+      # only CUDA0 (on cuda_v13, matching the 13.3 driver). Nothing here wants
+      # the slower path, so the backend is turned off rather than left to the
+      # scheduler's device de-duplication.
+      OLLAMA_VULKAN = "0";
 
       # ollama's default window is 4096 tokens, which is useless for coding.
       # Budget against 32 GB of VRAM: Q4_K_M weights are 21.1 GB, and this
