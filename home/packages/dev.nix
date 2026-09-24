@@ -31,6 +31,7 @@
     (if stdenv.hostPlatform.isDarwin then emacs-nox.override { withMailutils = false; } else emacs-nox)
     gcc
     gh
+    git-cliff
     gitleaks
     glab
     gnumake
