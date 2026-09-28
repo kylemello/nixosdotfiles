@@ -47,6 +47,12 @@
         "repo": "mattpocock/skills"
       }
     },
+    "impeccable": {
+      "source": {
+        "source": "github",
+        "repo": "pbakaus/impeccable"
+      }
+    },
     "kmello": {
       "source": {
         "source": "directory",
