@@ -5,6 +5,20 @@ let
   # reads. Hardcoded the same way as the sessionPath entries and op-ssh-sign
   # below: this module only ever evaluates on artemis.
   windowsSshConfig = "/mnt/c/Users/kylem/.ssh/config";
+
+  # Opens URLs and local files in the Windows default browser. Same split as
+  # xdg-open's own WSL mode: rundll32 for URLs, explorer.exe for paths.
+  windowsBrowser = pkgs.writeShellScriptBin "windows-browser" ''
+    for target in "$@"; do
+      path=''${target#file://}
+      if [ -e "$path" ]; then
+        # explorer.exe exits 1 even when it succeeds
+        /mnt/c/Windows/explorer.exe "$(/bin/wslpath -aw "$path")" || true
+      else
+        /mnt/c/Windows/System32/rundll32.exe url.dll,FileProtocolHandler "$target"
+      fi
+    done
+  '';
 in
 {
   # Alias common SSH commands to their Windows executable counterparts.
@@ -27,6 +41,36 @@ in
       "/mnt/c/Users/kylem/AppData/Local/Programs/Zed/bin/"
     ];
   };
+
+  # Anything that opens a browser gets the Windows one, not the Linux
+  # ungoogled-chromium from home/packages/dev.nix. xdg-utils has a WSL mode
+  # that would do this, but it only switches on when explorer.exe is on PATH,
+  # which hosts/wsl.nix's interop.includePath = false rules out. Without a
+  # default handler xdg-open falls back to chromium's .desktop through
+  # mimeinfo.cache, and Python's webbrowser picks chromium straight from
+  # `xdg-settings get default-web-browser`.
+  #
+  # BROWSER covers gh, Python and the rest that read it before xdg-open. The
+  # defaults go in ~/.local/share/applications/mimeapps.list and not through
+  # xdg.mimeApps, because ~/.config/mimeapps.list belongs to Claude Code: it
+  # registers its claude-cli:// handler there with `xdg-mime default`, which
+  # would replace a Home Manager symlink and fail the next switch.
+  home.packages = [ windowsBrowser ];
+  home.sessionVariables.BROWSER = "windows-browser";
+
+  xdg.desktopEntries.windows-browser = {
+    name = "Windows default browser";
+    exec = "windows-browser %u";
+    mimeType = [ "x-scheme-handler/http" "x-scheme-handler/https" "text/html" ];
+    noDisplay = true;
+  };
+
+  xdg.dataFile."applications/mimeapps.list".text = ''
+    [Default Applications]
+    x-scheme-handler/http=windows-browser.desktop
+    x-scheme-handler/https=windows-browser.desktop
+    text/html=windows-browser.desktop
+  '';
 
   # Configure Git to use the Windows SSH client.
   programs.git = {
