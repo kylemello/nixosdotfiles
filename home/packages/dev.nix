@@ -10,6 +10,7 @@
     bitbucket-cli
     bun
     cargo
+    codex
     deno
     devenv
     docker-buildx

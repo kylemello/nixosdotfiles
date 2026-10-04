@@ -60,6 +60,29 @@
         "type": "github"
       }
     },
+    "codex-cli-nix": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790889289,
+        "narHash": "sha256-c2enAEAaGleMaBUU3zBdyCM3asCkHluKXn6TpDWmi6M=",
+        "owner": "sadjow",
+        "repo": "codex-cli-nix",
+        "rev": "361dfa0c8028b58be69eebc8b3850211b5f6d5cf",
+        "type": "github"
+      },
+      "original": {
+        "owner": "sadjow",
+        "repo": "codex-cli-nix",
+        "type": "github"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -190,6 +213,7 @@
         "bitbucket-cli": "bitbucket-cli",
         "catppuccin": "catppuccin",
         "claude-code": "claude-code",
+        "codex-cli-nix": "codex-cli-nix",
         "flake-utils": "flake-utils_2",
         "home-manager": "home-manager",
         "nixos-wsl": "nixos-wsl",

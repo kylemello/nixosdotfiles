@@ -22,6 +22,15 @@
     # of rebuilding locally on every version bump.
     claude-code.url = "github:sadjow/claude-code-nix";
 
+    # Always-fresh OpenAI Codex CLI (upstream refreshes hourly). Its overlay
+    # builds against our pkgs from a prebuilt release binary, so following
+    # nixpkgs costs no compile and avoids a second nixpkgs in the lock.
+    codex-cli-nix = {
+      url = "github:sadjow/codex-cli-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
+
     # Bitbucket CLI (bkt) — not packaged in nixpkgs; pulled from its upstream
     # flake and surfaced as pkgs.bitbucket-cli via the overlay below.
     bitbucket-cli = {
@@ -32,11 +41,13 @@
 
   # catppuccin is deliberately not destructured here: the only consumer is
   # home/catppuccin.nix, which reaches it through `inputs`.
-  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, claude-code, bitbucket-cli, ... }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, nixos-wsl, claude-code, codex-cli-nix, bitbucket-cli, ... }:
     let
       overlays = [
         (import ./overlays)
         claude-code.overlays.default
+        # Replaces nixpkgs' from-source pkgs.codex with the upstream binary.
+        codex-cli-nix.overlays.default
         # Expose the bitbucket-cli flake's package as pkgs.bitbucket-cli.
         # Named to avoid shadowing nixpkgs' unrelated `bkt` (a caching tool).
         (final: prev: {
