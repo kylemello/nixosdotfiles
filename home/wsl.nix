@@ -219,6 +219,9 @@ in
     host = "artemis";
   };
 
+  # Editable Codex config from this checkout, using the same link pattern.
+  kyle.codex.enable = true;
+
   # ~/.config/nvim symlinked out of this repo and shared with ariane. Enabled
   # HERE for the same checkout reason as kyle.claude — see home/nvim.nix.
   kyle.nvim.enable = true;

@@ -24,6 +24,7 @@
     ../../home/drift.nix
     ../../home/atuin.nix
     ../../home/claude.nix
+    ../../home/codex.nix
     ../../home/nvim.nix
     ../../home/sync.nix
     ../../home/opencode.nix

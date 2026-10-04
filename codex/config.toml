@@ -1,0 +1,14 @@
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
+
+[agents]
+max_concurrent_threads_per_session = 10
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+"gpt-6.1-sol" = 1
+
+[projects."/home/kyle/personal/noita-eyes"]
+trust_level = "trusted"
