@@ -22,15 +22,10 @@
         navigate = true;
         dark = true;
       };
-      
-      filter.lfs = {
-        required = true;
-        clean = "git-lfs clean -- %f";
-        smudge = "git-lfs smudge -- %f";
-        process = "git-lfs filter-process";
-      };
     };
-    
+
+    lfs.enable = true;
+
     signing = {
       key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUALOKH2pGfuaVbh3J/UlFPJOLx6CpraE8qcaWbkE5D";
       signByDefault = true;
