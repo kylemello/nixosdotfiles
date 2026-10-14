@@ -19,6 +19,10 @@
       "WebFetch",
       "WebSearch"
     ],
+    "additionalDirectories": [
+      "/mnt/c/Users/kylem/Vaults/work-knowledge-repo",
+      "/home/kyle/work/work-knowledge-repo"
+    ],
     "defaultMode": "auto"
   },
   "model": "opus[1m]",
