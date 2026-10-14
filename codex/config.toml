@@ -1,5 +1,5 @@
 model = "gpt-6.1-sol"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"
 
 [agents]
 max_concurrent_threads_per_session = 10
@@ -12,3 +12,6 @@ screen_reader_detection_done = true
 
 [projects."/home/kyle/personal/noita-eyes"]
 trust_level = "trusted"
+
+[notice]
+hide_rate_limit_model_nudge = true
