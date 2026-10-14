@@ -102,6 +102,16 @@ let
       args = [ "mcp-server-kubernetes" ];
       env = { };
     };
+    # The nixpkgs build, not `npx @playwright/mcp`: npm's Playwright downloads
+    # FHS-linked browsers that won't start on NixOS, while this wrapper pins
+    # PLAYWRIGHT_BROWSERS_PATH to nix-built ones. Headless because WSL has no
+    # reliable display for a headed window.
+    playwright = {
+      type = "stdio";
+      command = "${pkgs.playwright-mcp}/bin/playwright-mcp";
+      args = [ "--headless" ];
+      env = { };
+    };
     teams-mcp = {
       type = "stdio";
       command = "npx";
