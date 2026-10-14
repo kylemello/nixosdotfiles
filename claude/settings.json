@@ -5,6 +5,11 @@
     "sessionUrl": false
   },
   "includeCoAuthoredBy": false,
+  "env": {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "include.path",
+    "GIT_CONFIG_VALUE_0": "~/.config/git/claude.gitconfig"
+  },
   "permissions": {
     "allow": [
       "Bash(podman ps:*)",
