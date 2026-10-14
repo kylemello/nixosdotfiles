@@ -52,6 +52,11 @@ let
 
     # psmux-sensible forces escape-time 50; re-apply ours after it
     set -s escape-time 1
+
+    # psmux-continuum registers these with a foreground run-shell, which puts
+    # "running: pwsh ..." in the status bar on every attach. Same hooks, -b.
+    set-hook -g client-attached 'run-shell -b "pwsh -NoProfile -File \"~/.psmux/plugins/psmux-continuum/scripts/auto_save.ps1\" -IntervalMinutes 1"'
+    set-hook -g session-created 'run-shell -b "pwsh -NoProfile -File \"~/.psmux/plugins/psmux-continuum/scripts/auto_restore.ps1\""'
   '';
 in
 {
