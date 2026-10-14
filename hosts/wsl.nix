@@ -391,6 +391,23 @@
   };
   networking.firewall.allowedTCPPorts = [ 2222 ];
 
+  # Keep NetworkManager (enabled for every host in hosts/common.nix) off the
+  # mirrored interfaces. In mirrored mode WSL itself pushes the host's
+  # addresses and routes into eth*/loopback0; nothing here should run DHCP on
+  # them. NM normally leaves them alone as "connected (externally)" because
+  # they already carry addresses when it starts — but once the host link
+  # flaps, NM takes the device over, auto-creates a "Wired connection N"
+  # profile, and every failed DHCP attempt (~45s apart) flushes the address.
+  # Measured 2026-09-28 after moving the Ethernet cable between ports: eth0
+  # stayed UP with no IPv4 or default route, "Activation: failed for connection
+  # 'Wired connection 4'" repeated in the journal, and an address re-added by
+  # hand was gone again within minutes. `nmcli device set eth0 managed no`
+  # stopped it; this is the declarative form.
+  networking.networkmanager.unmanaged = [
+    "interface-name:eth*"
+    "interface-name:loopback0"
+  ];
+
   services.pulseaudio.enable = true;
   networking.wireless.enable = lib.mkForce false;
 
