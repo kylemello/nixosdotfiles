@@ -22,6 +22,7 @@ in
     ./hardware-configuration.nix
     ../../hosts/common.nix
     ../../hosts/sync-hub.nix
+    ../../hosts/truenas-mounts.nix
   ];
 
   # Machine-specific settings

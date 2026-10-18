@@ -3,6 +3,7 @@
   imports = [
     ../../hosts/common.nix
     ../../hosts/wsl.nix
+    ../../hosts/truenas-mounts.nix
   ];
 
   # Machine-specific settings
@@ -24,8 +25,6 @@
       ../../home/wsl.nix
     ];
   };
-
-  boot.supportedFilesystems = [ "nfs" ];
 
   system.stateVersion = "25.05";
 }
