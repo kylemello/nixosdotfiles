@@ -3,3 +3,6 @@
 
 # Per-stack compose credentials (see home/docker-composes.nix)
 docker-composes/**/.env
+
+# Claude Code org skill sync — never commit (public repo)
+claude/skills/synced/
