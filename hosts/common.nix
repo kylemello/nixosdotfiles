@@ -141,5 +141,32 @@
         RestartSec = 1;
       };
     };
+
+  # Having the keyring *running* is not enough for bkt (the Bitbucket CLI). Its
+  # internal/secret/store.go classifies any SSH session with no DISPLAY or
+  # WAYLAND_DISPLAY as headless and then narrows the backend list to keyctl +
+  # pass, dropping the Secret Service entirely to avoid hanging on GUI unlock
+  # prompts. Neither survivor works here: `pass` isn't installed and the keyctl
+  # backend doesn't register, so every allowed backend fails and `bkt auth
+  # login` dies with "Specified keyring backend not available" — on a box whose
+  # org.freedesktop.secrets is up and unlocked.
+  #
+  # 99designs/keyring consults KEYRING_BACKEND *before* that heuristic
+  # (resolveAllowedBackends), so this puts the Secret Service back in play. The
+  # name is deliberately un-prefixed: it is the library's variable, not bkt's,
+  # and applies to any Go tool built on it — which is what we want on a host
+  # where the Secret Service is the only working backend.
+  #
+  # Gated exactly like the unlock unit above: desktop hosts export DISPLAY, are
+  # never classified headless, and need no override.
+  #
+  # NOTE: bkt stores under its own collection name ("bkt"), and 99designs looks
+  # collections up by D-Bus path, not by the `default` alias — so it never sees
+  # the login keyring. A missing collection makes it try to *create* one, which
+  # needs a prompter that headless hosts don't have. The collection therefore
+  # has to exist up front; ~/.local/share/keyrings/bkt.keyring is created once
+  # with an empty master password and is user data, not managed here.
+  environment.sessionVariables.KEYRING_BACKEND =
+    lib.mkIf (!config.services.desktopManager.gnome.enable) "secret-service";
 }
 
