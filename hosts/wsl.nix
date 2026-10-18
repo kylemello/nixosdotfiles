@@ -8,11 +8,16 @@
   # already exist here by hand — note an empty directory counts, so `skills`
   # collides too. Without this, `nixos-rebuild switch --flake .#artemis` aborts.
   #
-  # This lives in hosts/wsl.nix, NOT hosts/common.nix, because artemis is the
-  # only NixOS host with any Home-Manager-managed dotfile collisions:
-  # kyle.claude.enable is off on atlas/gateway/nixosvm, and setting the option
-  # in hosts/common.nix perturbs all four systemd home-manager units (measured:
-  # it changes atlas/gateway/nixosvm's system derivation hashes for no benefit).
+  # This lives in hosts/wsl.nix, NOT hosts/common.nix, because setting the
+  # option in hosts/common.nix perturbs all four systemd home-manager units
+  # (measured: it changes atlas/nixosvm's system derivation hashes for no
+  # benefit — they leave kyle.claude.enable off and have no HM-managed dotfile
+  # collisions).
+  #
+  # gateway ALSO needs this and sets it itself in
+  # machines/gateway/configuration.nix: home/gateway.nix turned on
+  # kyle.claude.enable there, so it owns ~/.claude too. Keep the two in sync —
+  # if a third NixOS host enables kyle.claude, it needs the option as well.
   #
   # The backups are one-shot: a second rebuild fails if a `.hm-bak` from the
   # first is still sitting there, so clear them once the switch is confirmed.

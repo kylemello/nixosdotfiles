@@ -38,8 +38,32 @@ in
 
   # --- Accounts -------------------------------------------------------------
 
-  # Kyle (owner). Base account/groups come from hosts/common.nix; just the keys.
+  # Kyle (owner). Base account/groups come from hosts/common.nix; just the keys
+  # and the linger flag the Remote Control server depends on.
   users.users.kyle = {
+    # kyle.claudeRemote (home/gateway.nix) is a systemd USER service, so it lives
+    # inside user@1000.service — and without lingering that manager only exists
+    # while kyle has a login session. On a headless box nobody logs into, the
+    # Remote Control server is therefore almost never up: the only thing starting
+    # it was the `wip` timer SSHing in from artemis with the key below, which
+    # kept it alive for exactly as long as that poll's session lasted.
+    #
+    # Measured 2026-08-13, before this line: 14s of uptime per ~6-minute poll
+    # (~4%), and the unit's own accounting — "Consumed 9.341s CPU time over
+    # 14.713s wall clock time" — shows it spent its entire life starting up and
+    # never reached steady state. Sessions driven from claude.ai/code had their
+    # host torn down mid-turn, and each start pre-created another duplicate
+    # "gateway" entry in the session list.
+    #
+    # NOT the remoteDialogSeen hard-loop that home/claude-remote.nix documents:
+    # the unit never crashed, NRestarts stayed 0, and Restart=always never fired.
+    # The manager went away and took the service with it.
+    #
+    # Cannot live in home/claude-remote.nix — that is a Home Manager module and
+    # this is a NixOS option. Any future headless host that enables
+    # kyle.claudeRemote needs this line too.
+    linger = true;
+
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGHjWpYtbVkI+N6NbmnVYvI+YBnpRlnPjaYNFqhNTMqE"
 
@@ -127,6 +151,23 @@ in
     # /home/kyle or /home/seth. The workspace lives under /var/lib, which
     # ProtectHome does not mask. Seth still reaches it via the `ci` group.
   };
+
+  # Home Manager aborts the whole rebuild rather than replacing a pre-existing
+  # unmanaged file ("Existing file ... would be clobbered",
+  # check-link-targets.sh). home/gateway.nix turns on kyle.claude.enable, so
+  # this box owns ~/.claude/{settings.json,CLAUDE.md,agents,commands} — the same
+  # collision class hosts/wsl.nix guards against for artemis. Without this, a
+  # stray hand-written file under ~/.claude fails the switch (it did on
+  # 2026-08-07: home-manager-kyle.service died three times on settings.json).
+  #
+  # Set here rather than in hosts/common.nix on purpose: atlas and nixosvm leave
+  # kyle.claude.enable off and have no HM-managed dotfiles, and the option
+  # perturbs their systemd home-manager units for no benefit. artemis and
+  # gateway are the only NixOS hosts that need it — see hosts/wsl.nix:19.
+  #
+  # The backups are one-shot: a second rebuild fails if a `.hm-bak` from the
+  # first is still sitting there, so clear them once the switch is confirmed.
+  home-manager.backupFileExtension = "hm-bak";
 
   # Assign the Home Manager profile to the user. The shared profile plus the
   # gateway-specific user layer, mirroring how artemis pairs it with
