@@ -6,3 +6,4 @@ docker-composes/**/.env
 
 # Claude Code org skill sync — never commit (public repo)
 claude/skills/synced/
+claude/skills/.trash/
