@@ -5,6 +5,23 @@ let
   # DOTNET_ROOT below and the `dotnet` on PATH cannot drift apart.
   dotnet = pkgs.dotnetCorePackages.sdk_10_0;
   dotnetRoot = "${dotnet}/share/dotnet";
+
+  # Symbolic hotkey 263 is Keyboard Shortcuts > Screenshots > "Ask Siri about
+  # active window" (⇧⌘Space: keycode 49, modifiers 0x120000). The value is
+  # written back out with the default binding so Settings still shows it, just
+  # unchecked.
+  hotkeysPlist =
+    "${config.home.homeDirectory}/Library/Preferences/com.apple.symbolichotkeys.plist";
+  noSiriWindowShortcut = pkgs.writeShellScript "no-siri-window-shortcut" ''
+    set -euo pipefail
+    enabled=$(/usr/bin/defaults export com.apple.symbolichotkeys - \
+      | /usr/bin/plutil -extract AppleSymbolicHotKeys.263.enabled raw -o - - 2>/dev/null || true)
+    [ "$enabled" = false ] && exit 0
+    /usr/bin/defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 263 \
+      '<dict><key>enabled</key><false/><key>value</key><dict><key>parameters</key><array><integer>32</integer><integer>49</integer><integer>1179648</integer></array><key>type</key><string>standard</string></dict></dict>'
+    /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
+    echo "$(date '+%F %T') re-disabled hotkey 263 (was: ''${enabled:-unset})"
+  '';
 in
 {
   # macOS-specific user tweaks — the analogue of home/wsl.nix.
@@ -128,4 +145,21 @@ in
   # Not ~/.dotnet: that is dotnet's own user-install/tools directory, and
   # handing it a read-only store symlink would break `dotnet tool install`.
   home.file.".local/share/dotnet".source = dotnetRoot;
+
+  # macOS 27's Siri AI keeps turning "Ask Siri about active window" back on
+  # after it is unchecked in Settings, stealing ⇧⌘Space. Re-disable it whenever
+  # the hotkeys plist changes (and once at login). The script is a no-op when
+  # the entry is already off, so its own write retriggering the watch is
+  # harmless; launchd's default 10s throttle bounds any tug-of-war.
+  launchd.agents.no-siri-window-shortcut = {
+    enable = true;
+    config = {
+      ProgramArguments = [ "${noSiriWindowShortcut}" ];
+      WatchPaths = [ hotkeysPlist ];
+      RunAtLoad = true;
+      ProcessType = "Background";
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/no-siri-window-shortcut.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/no-siri-window-shortcut.log";
+    };
+  };
 }
