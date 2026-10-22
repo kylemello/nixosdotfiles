@@ -25,6 +25,9 @@
         ForwardAgent yes
         IdentitiesOnly yes
         IdentityAgent "~/.1password/agent.sock"
+        # Ghostty's TERM=xterm-ghostty has no terminfo on most remotes. SetEnv
+        # overrides the TERM in the pty request (OpenSSH 8.7+), no AcceptEnv needed.
+        SetEnv TERM=xterm-256color
 
       # =======================
       # Friend Hosts
