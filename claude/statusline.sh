@@ -67,8 +67,8 @@ if [ -n "$ctx" ]; then
     segs+=("${hc}${ctx}% ctx")
   fi
 fi
-if [ -n "$five" ]; then heat "$five"; segs+=("${hc}5h ${five}%"); fi
-if [ -n "$seven" ]; then heat "$seven"; segs+=("${hc}7d ${seven}%"); fi
+if [ -n "$five" ]; then heat "$five"; segs+=("${hc}5h (${five}%)"); fi
+if [ -n "$seven" ]; then heat "$seven"; segs+=("${hc}7d (${seven}%)"); fi
 [ -n "$cost" ] && segs+=("${dim_c}$(printf '$%.2f' "$cost")")
 [ $((added + removed)) -gt 0 ] && segs+=("${add_c}+${added} ${del_c}−${removed}")
 
