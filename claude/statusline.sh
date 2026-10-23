@@ -28,6 +28,8 @@ vcs_c=$'\033[95m'
 dim_c=$'\033[90m'
 warn_c=$'\033[38;2;249;226;175m'
 crit_c=$'\033[38;2;243;139;168m'
+add_c=$'\033[38;2;166;227;161m'
+del_c=$'\033[38;2;243;139;168m'
 
 host=${HOSTNAME:-$(uname -n)}
 host=${host%%.*}
@@ -60,7 +62,7 @@ if [ -n "$ctx" ]; then heat "$ctx"; segs+=("${hc}${ctx}% ctx"); fi
 if [ -n "$five" ]; then heat "$five"; segs+=("${hc}5h ${five}%"); fi
 if [ -n "$seven" ]; then heat "$seven"; segs+=("${hc}7d ${seven}%"); fi
 [ -n "$cost" ] && segs+=("${dim_c}$(printf '$%.2f' "$cost")")
-[ $((added + removed)) -gt 0 ] && segs+=("${dim_c}+${added} −${removed}")
+[ $((added + removed)) -gt 0 ] && segs+=("${add_c}+${added} ${del_c}−${removed}")
 
 [ ${#segs[@]} -eq 0 ] && { printf '%s' "$left"; exit; }
 right=${segs[0]}
