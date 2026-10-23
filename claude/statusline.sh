@@ -28,12 +28,25 @@ esac
 branch=$(git -C "$dir" --no-optional-locks symbolic-ref --short -q HEAD 2>/dev/null \
   || git -C "$dir" --no-optional-locks rev-parse --short HEAD 2>/dev/null)
 
-line="${user_c}${USER:-$(id -un)}${reset}@${host_c}${host}${reset} ${cwd_c}${shown}"
-[ -n "$branch" ] && line+="${vcs_c} (${branch})"
-line+="${reset}"
+left="${user_c}${USER:-$(id -un)}${reset}@${host_c}${host}${reset} ${cwd_c}${shown}"
+[ -n "$branch" ] && left+="${vcs_c} (${branch})"
+left+="${reset}"
 
 extra=$model
 [ -n "$ctx" ] && extra+="${extra:+ · }${ctx}% ctx"
-[ -n "$extra" ] && line+="  ${dim_c}${extra}${reset}"
+[ -z "$extra" ] && { printf '%s' "$left"; exit; }
+right="${dim_c}${extra}${reset}"
 
-printf '%s' "$line"
+width() {
+  local s
+  s=$(printf '%s' "$1" | sed $'s/\033\\[[0-9;]*m//g')
+  echo "${#s}"
+}
+
+# COLUMNS is the full terminal width; margin leaves room for Claude Code's own
+# row spacing. Raise it if the right edge wraps, lower it if it sits short.
+margin=4
+pad=$(( ${COLUMNS:-80} - $(width "$left") - $(width "$right") - margin ))
+[ "$pad" -lt 2 ] && pad=2
+
+printf '%s%*s%s' "$left" "$pad" '' "$right"
