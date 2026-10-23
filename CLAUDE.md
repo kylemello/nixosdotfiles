@@ -26,6 +26,7 @@ Before writing, staging, or committing anything:
 **Every change to this repo gets committed and pushed to `origin/master` as soon as it is done and verified.** Standing authorization, no need to ask first. Don't leave work sitting in the working tree: artemis and ariane both push here, so anything left unpushed on one machine turns into a rebase conflict on the other.
 
 - Rebase first, never merge: `git fetch && git rebase origin/master`, then `git push`. Never force-push `master`.
+- This covers changes you didn't make. Anything already in the working tree when a task finishes (an `update-overlays` bump, a `flake.lock` refresh, a tool's write into `claude/`) gets reviewed, verified and committed too, split into its own logical commits. Don't leave it as "someone else's work in progress"; ask only if it looks unfinished or broken.
 - One commit per logical change, and stage paths explicitly. Everything in the public-repo section above still applies to every push.
 - `claude/skills/synced/` is Claude Code's org skill sync. Leave it untracked and never commit it.
 
