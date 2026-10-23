@@ -112,12 +112,6 @@ let
       args = [ "--headless" ];
       env = { };
     };
-    teams-mcp = {
-      type = "stdio";
-      command = "npx";
-      args = [ "-y" "@floriscornel/teams-mcp@latest" ];
-      env = { };
-    };
   };
 
   mcpServers = lib.optionalAttrs config.kyle.claudeCode.enable workstationServers;
