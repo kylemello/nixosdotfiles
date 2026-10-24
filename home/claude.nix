@@ -37,6 +37,40 @@ in
       '';
       example = "artemis";
     };
+
+    workAccount = {
+      enable = lib.mkEnableOption ''
+        a second Claude Code login, picked by the folder `claude` starts in.
+        Under one of `dirs` it runs with CLAUDE_CONFIG_DIR=~/.claude-work (the
+        work account); anywhere else it gets the default ~/.claude (personal).
+        Each dir holds its own login and .claude.json; CLAUDE.md, skills,
+        agents, commands, settings and the plugins dir are shared. Needs
+        kyle.claude.enable
+      '';
+
+      dirs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "${config.home.homeDirectory}/work" ];
+        defaultText = lib.literalExpression ''[ "''${config.home.homeDirectory}/work" ]'';
+        description = ''
+          Absolute folders whose subtree uses the work account. Matched against
+          both the logical and the physical cwd, so a symlink inside one of
+          these (~/work/work-knowledge-repo -> /mnt/c/...) counts when entered
+          through it, but its target reached directly does not.
+        '';
+      };
+    };
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.claude-code;
+      defaultText = lib.literalExpression "pkgs.claude-code";
+      internal = true;
+      description = ''
+        The `claude` for callers that pin a store path instead of using PATH
+        (home/q.nix): the account-switching wrapper when workAccount is on.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable (
@@ -63,6 +97,59 @@ in
       # clone present, since the path is resolved either way.
       repo = "${config.home.homeDirectory}/nixosdotfiles/claude";
       link = p: config.lib.file.mkOutOfStoreSymlink "${repo}/${p}";
+
+      work = cfg.workAccount;
+      homeDir = config.home.homeDirectory;
+
+      # On PATH ahead of pkgs.claude-code (hiPrio), so fish, bash scripts, tmux
+      # and editors that run `claude` all go through it. Decides per launch:
+      # CLAUDE_CONFIG_DIR moves the login (.credentials.json) and .claude.json
+      # into ~/.claude-work (read out of the 2.1.308 bundle, then strace on 2.1.309
+      # showed a ~/work launch opening ~/.claude-work/.credentials.json, 2026-10-23).
+      # CLAUDE_CODE_PLUGIN_CACHE_DIR keeps work on ~/.claude/plugins, since the
+      # installed_plugins.json there holds absolute ~/.claude/plugins paths;
+      # org-synced plugins sit in per-<org>_<user> buckets, so the two
+      # accounts don't trample each other.
+      #
+      # A CLAUDE_CONFIG_DIR inherited from a work session is decided again, so
+      # `claude` run from a work session in a personal folder switches back.
+      # Any other value was set by hand and is left alone.
+      wrapper = pkgs.writeShellScriptBin "claude" ''
+        set -euo pipefail
+
+        work=${lib.escapeShellArg "${homeDir}/.claude-work"}
+        plugins=${lib.escapeShellArg "${homeDir}/.claude/plugins"}
+
+        under() { case "$1/" in "$2"/*) return 0 ;; esac; return 1; }
+
+        if [ -z "''${CLAUDE_CONFIG_DIR:-}" ] || [ "$CLAUDE_CONFIG_DIR" = "$work" ]; then
+          unset CLAUDE_CONFIG_DIR
+          if [ "''${CLAUDE_CODE_PLUGIN_CACHE_DIR:-}" = "$plugins" ]; then
+            unset CLAUDE_CODE_PLUGIN_CACHE_DIR
+          fi
+          # bash resets an inherited PWD that doesn't match the real cwd, so
+          # $PWD is trustworthy here even when an editor spawned us.
+          for root in ${lib.escapeShellArgs (map (lib.removeSuffix "/") work.dirs)}; do
+            if under "$PWD" "$root" || under "$(pwd -P)" "$root"; then
+              export CLAUDE_CONFIG_DIR="$work" CLAUDE_CODE_PLUGIN_CACHE_DIR="$plugins"
+              break
+            fi
+          done
+        fi
+
+        exec ${pkgs.claude-code}/bin/claude "$@"
+      '';
+
+      # The same links in each config dir, so both accounts see one CLAUDE.md,
+      # skill set and settings.json.
+      shared = dir: {
+        "${dir}/CLAUDE.md".source = link "CLAUDE.md";
+        "${dir}/skills".source = link "skills";
+        "${dir}/agents".source = link "agents";
+        "${dir}/commands".source = link "commands";
+        "${dir}/settings.json".source = link "settings.json";
+        "${dir}/settings.local.json".source = link "local/${cfg.host}.json";
+      };
     in
     {
       # A missing/typo'd host would silently produce a dangling
@@ -105,14 +192,15 @@ in
       #                      is instead deep-merged into by home/claude-code.nix
       #   cache/ daemon/ session-env/ shell-snapshots/ telemetry/ file-history/
       #   backups/ plugins/  all derived or machine-local
-      home.file = {
-        ".claude/CLAUDE.md".source = link "CLAUDE.md";
-        ".claude/skills".source = link "skills";
-        ".claude/agents".source = link "agents";
-        ".claude/commands".source = link "commands";
-        ".claude/settings.json".source = link "settings.json";
-        ".claude/settings.local.json".source = link "local/${cfg.host}.json";
-      };
+      #
+      # ~/.claude-work gets the same links and nothing else. Its .claude.json,
+      # .credentials.json, history.jsonl and projects/ are its own: projects/
+      # holds the transcripts and auto-memory, keyed by path, so the work
+      # repos' entries were moved over by hand when this was set up.
+      home.file = shared ".claude" // lib.optionalAttrs work.enable (shared ".claude-work");
+
+      home.packages = lib.mkIf work.enable [ (lib.hiPrio wrapper) ];
+      kyle.claude.package = lib.mkIf work.enable wrapper;
     }
   );
 }

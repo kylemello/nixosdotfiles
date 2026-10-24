@@ -36,8 +36,9 @@ let
     # Absolute store paths, resolved here rather than looked up on PATH, for the
     # same reason home/wip.nix pins its WIP_* contract: `q` is invoked from an
     # interactive shell today, but PATH drift must not be able to silently
-    # change which claude it talks to.
-    export Q_CLAUDE=${pkgs.claude-code}/bin/claude
+    # change which claude it talks to. kyle.claude.package is pkgs.claude-code,
+    # or the wrapper that picks the work or personal account by folder.
+    export Q_CLAUDE=${config.kyle.claude.package}/bin/claude
     export Q_PLATFORM=${lib.escapeShellArg platform}
 
     # Nix already knows these, so the model may as well: it is the difference

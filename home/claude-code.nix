@@ -149,6 +149,13 @@ let
   # it from a host that already has it — do that with `claude mcp remove`. Likewise
   # dropping homeTrust does not re-arm the prompt; clear the key by hand for that.
   desired = builtins.toJSON ({ inherit mcpServers; } // homeTrust);
+
+  # The work account (kyle.claude.workAccount, home/claude.nix) reads its own
+  # .claude.json, which needs the same servers. Tokens added by hand, like
+  # home-assistant's header, have to be added there too, with the
+  # `claude mcp add` run from inside ~/work.
+  claudeJsons = [ "$HOME/.claude.json" ]
+    ++ lib.optional config.kyle.claude.workAccount.enable "$HOME/.claude-work/.claude.json";
 in
 {
   # For the kyle.claudeCode.enable default below. Imported here as well as from
@@ -186,22 +193,24 @@ in
   # homeTrust adds under an existing projects[~] entry, which keeps its siblings.
   config.home.activation.claudeCodeJson =
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      claudeJson="$HOME/.claude.json"
       desired='${desired}'
       jq=${pkgs.jq}/bin/jq
-      if [ ! -e "$claudeJson" ]; then
-        $DRY_RUN_CMD printf '%s\n' "$desired" > "$claudeJson"
-        $DRY_RUN_CMD chmod 600 "$claudeJson"
-      elif "$jq" -e . "$claudeJson" >/dev/null 2>&1; then
-        tmp="$(mktemp "$claudeJson.XXXXXX")"
-        if "$jq" --argjson d "$desired" '. * $d' "$claudeJson" > "$tmp"; then
-          $DRY_RUN_CMD mv "$tmp" "$claudeJson"
+      for claudeJson in ${lib.concatMapStringsSep " " (p: ''"${p}"'') claudeJsons}; do
+        if [ ! -e "$claudeJson" ]; then
+          $DRY_RUN_CMD mkdir -p "$(dirname "$claudeJson")"
+          $DRY_RUN_CMD printf '%s\n' "$desired" > "$claudeJson"
+          $DRY_RUN_CMD chmod 600 "$claudeJson"
+        elif "$jq" -e . "$claudeJson" >/dev/null 2>&1; then
+          tmp="$(mktemp "$claudeJson.XXXXXX")"
+          if "$jq" --argjson d "$desired" '. * $d' "$claudeJson" > "$tmp"; then
+            $DRY_RUN_CMD mv "$tmp" "$claudeJson"
+          else
+            rm -f "$tmp"
+            echo "claude-code: failed to merge declared config into $claudeJson" >&2
+          fi
         else
-          rm -f "$tmp"
-          echo "claude-code: failed to merge declared config into $claudeJson" >&2
+          echo "claude-code: $claudeJson is not valid JSON; skipping config merge" >&2
         fi
-      else
-        echo "claude-code: $claudeJson is not valid JSON; skipping config merge" >&2
-      fi
+      done
     '';
 }

@@ -217,6 +217,8 @@ in
   kyle.claude = {
     enable = true;
     host = "artemis";
+    # Personal login everywhere, the work one under ~/work.
+    workAccount.enable = true;
   };
 
   # Editable Codex config from this checkout, using the same link pattern.
