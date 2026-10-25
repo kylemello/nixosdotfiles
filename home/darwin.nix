@@ -106,6 +106,8 @@ in
   kyle.claude = {
     enable = true;
     host = "ariane";
+    # Personal login everywhere, the work one under ~/work.
+    workAccount.enable = true;
   };
 
   # ~/.config/nvim symlinked out of this repo and shared with artemis. Enabled
