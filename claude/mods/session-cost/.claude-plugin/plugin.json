@@ -1,0 +1,6 @@
+{
+  "name": "session-cost",
+  "version": "0.2.0",
+  "description": "Shows the session's, today's and this week's dollar cost in the prompt footer.",
+  "types": "./types/index.d.ts"
+}

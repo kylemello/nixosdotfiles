@@ -7,3 +7,7 @@ docker-composes/**/.env
 # Claude Code org skill sync — never commit (public repo)
 claude/skills/synced/
 claude/skills/.trash/
+
+# Claude Code writes these into a mod folder when it loads it
+claude/mods/*/.claude-plugin/types/
+claude/mods/*/tsconfig.json
