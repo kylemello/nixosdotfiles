@@ -1,16 +1,16 @@
 {
-  "attribution": {
-    "commit": "",
-    "pr": "",
-    "sessionUrl": false
-  },
-  "includeCoAuthoredBy": false,
   "env": {
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "include.path",
     "GIT_CONFIG_VALUE_0": "~/.config/git/claude.gitconfig",
     "CLAUDE_CODE_PLUGIN_DIRS": "~/nixosdotfiles/claude/mods/session-cost"
   },
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+  "includeCoAuthoredBy": false,
   "permissions": {
     "allow": [
       "Bash(podman ps:*)",
@@ -20,11 +20,11 @@
       "WebFetch",
       "WebSearch"
     ],
+    "defaultMode": "auto",
     "additionalDirectories": [
       "/mnt/c/Users/kylem/Vaults/work-knowledge-repo",
       "/home/kyle/work/work-knowledge-repo"
-    ],
-    "defaultMode": "auto"
+    ]
   },
   "model": "opus[1m]",
   "statusLine": {
@@ -198,5 +198,6 @@
   "inputNeededNotifEnabled": false,
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
-  "voiceEnabled": false
+  "voiceEnabled": false,
+  "theme": "dark"
 }
