@@ -19,17 +19,7 @@
     # version. ariane already had this for Azure Storage Explorer and keeps the
     # DOTNET_ROOT wiring it needs in home/darwin.nix.
     dotnetCorePackages.sdk_10_0
-    # withMailutils only buys emacs `movemail`, and mailutils 3.21 no longer
-    # links on aarch64-darwin: libmu_sieve's uidnew extension leaves
-    # mu_url_{set_scheme,sget_path,to_string} undefined, which the macOS linker
-    # rejects outright where ELF would have let it slide.
-    #
-    #   ld: symbol(s) not found for architecture arm64
-    #
-    # Not an overlay, because that would rebuild emacs on the Linux hosts too,
-    # where mailutils is fine and cached. Revisit when nixpkgs' mailutils
-    # builds on darwin again.
-    (if stdenv.hostPlatform.isDarwin then emacs-nox.override { withMailutils = false; } else emacs-nox)
+    emacs-nox
     gcc
     gh
     git-cliff
