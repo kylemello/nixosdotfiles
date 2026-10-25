@@ -49,10 +49,10 @@ test('the footer shows this session, today and the week across sessions', async 
     return <Text>{e.component === 'SessionMode' ? e.props.modes.join(' & ') : ''}</Text>
   })
 
-  const footer = async () => {
+  const footer = async (surface: 'desktop' | 'terminal' = 'desktop') => {
     const ui = await $.ui.mount({
       plugin: 'session-cost',
-      surface: 'desktop',
+      surface,
       component: 'SessionMode',
       requestId: 'mode',
       props: { modes: ['focus'] },
@@ -73,6 +73,7 @@ test('the footer shows this session, today and the week across sessions', async 
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(await footer()).toBe('focus & $1.50 · today $3.50 · week $6.50')
+  expect(await footer('terminal')).toBe('focus')
 
   await measure(2.25)
   expect(await footer()).toBe('focus & $2.25 · today $4.25 · week $7.25')

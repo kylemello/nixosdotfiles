@@ -97,7 +97,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+  on('ui.render', { component: 'SessionMode', surface: 'desktop' }, async ($, e, next) => {
     const value = await read($, spend)
     if (value === null) {
       return next(e)
