@@ -38,13 +38,24 @@ in
       example = "artemis";
     };
 
+    settings = lib.mkOption {
+      type = lib.types.str;
+      default = "settings.json";
+      description = ''
+        Which file in claude/ ~/.claude/settings.json links to: settings.json is
+        the personal account's, settings.work.json the work account's (which
+        ~/.claude-work always gets).
+      '';
+      example = "settings.work.json";
+    };
+
     workAccount = {
       enable = lib.mkEnableOption ''
         a second Claude Code login, picked by the folder `claude` starts in.
         Under one of `dirs` it runs with CLAUDE_CONFIG_DIR=~/.claude-work (the
         work account); anywhere else it gets the default ~/.claude (personal).
-        Each dir holds its own login and .claude.json; CLAUDE.md, skills,
-        agents, commands, settings and the plugins dir are shared. Needs
+        Each dir holds its own login, .claude.json and settings.json; CLAUDE.md,
+        skills, agents, commands and the plugins dir are shared. Needs
         kyle.claude.enable
       '';
 
@@ -140,14 +151,17 @@ in
         exec ${pkgs.claude-code}/bin/claude "$@"
       '';
 
-      # The same links in each config dir, so both accounts see one CLAUDE.md,
-      # skill set and settings.json.
-      shared = dir: {
+      # The same links in each config dir, so both accounts see one CLAUDE.md
+      # and skill set. settings.json is per account: the personal org syncs
+      # every Anthropic knowledge-work plugin from claude.ai (37 MCP servers
+      # wanting a sign-in), so its file turns syncClaudeAiPlugins off and leaves
+      # out the work plugins, while the work org's few synced ones stay on.
+      shared = dir: settings: {
         "${dir}/CLAUDE.md".source = link "CLAUDE.md";
         "${dir}/skills".source = link "skills";
         "${dir}/agents".source = link "agents";
         "${dir}/commands".source = link "commands";
-        "${dir}/settings.json".source = link "settings.json";
+        "${dir}/settings.json".source = link settings;
         "${dir}/settings.local.json".source = link "local/${cfg.host}.json";
       };
     in
@@ -168,14 +182,20 @@ in
           message = "kyle.claude.host = \"${cfg.host}\" but claude/local/${cfg.host}.json "
             + "does not exist in the flake (did you forget to `git add` it?).";
         }
+        {
+          assertion = builtins.pathExists (../claude + "/${cfg.settings}");
+          message = "kyle.claude.settings = \"${cfg.settings}\" but claude/${cfg.settings} "
+            + "does not exist in the flake.";
+        }
       ];
 
       # Verified 2026-07-28: Claude Code writes THROUGH these symlinks rather
       # than replacing them, so /config, /plugin and "always allow" all keep
       # working and their changes land in git.
       #
-      # settings.json is shared: enabling a plugin on one machine propagates to
-      # the other on the next `git pull`. settings.local.json is per-host,
+      # settings.json (personal) and settings.work.json are each shared across
+      # machines: enabling a plugin on one propagates to the other on the next
+      # `git pull`, but only for that account. settings.local.json is per-host,
       # holding only what genuinely cannot be shared — the absolute marketplace
       # paths. Notably the podman permissions that used to sit in ariane's
       # settings.local.json were moved into the SHARED settings.json: it is
@@ -193,11 +213,13 @@ in
       #   cache/ daemon/ session-env/ shell-snapshots/ telemetry/ file-history/
       #   backups/ plugins/  all derived or machine-local
       #
-      # ~/.claude-work gets the same links and nothing else. Its .claude.json,
+      # ~/.claude-work gets the same links, with settings.work.json as its
+      # settings.json, and nothing else. Its .claude.json,
       # .credentials.json, history.jsonl and projects/ are its own: projects/
       # holds the transcripts and auto-memory, keyed by path, so the work
       # repos' entries were moved over by hand when this was set up.
-      home.file = shared ".claude" // lib.optionalAttrs work.enable (shared ".claude-work");
+      home.file = shared ".claude" cfg.settings
+        // lib.optionalAttrs work.enable (shared ".claude-work" "settings.work.json");
 
       home.packages = lib.mkIf work.enable [ (lib.hiPrio wrapper) ];
       kyle.claude.package = lib.mkIf work.enable wrapper;

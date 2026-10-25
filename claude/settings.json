@@ -20,11 +20,7 @@
       "WebFetch",
       "WebSearch"
     ],
-    "defaultMode": "auto",
-    "additionalDirectories": [
-      "/mnt/c/Users/kylem/Vaults/work-knowledge-repo",
-      "/home/kyle/work/work-knowledge-repo"
-    ]
+    "defaultMode": "auto"
   },
   "model": "opus[1m]",
   "statusLine": {
@@ -37,20 +33,16 @@
     "security-guidance@claude-plugins-official": true,
     "commit-commands@claude-plugins-official": true,
     "claude-code-setup@claude-plugins-official": true,
-    "atlassian@claude-plugins-official": true,
     "microsoft-docs@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
     "feature-dev@claude-plugins-official": true,
     "kmello-skills@kmello": true,
-    "aegis-jira@kmello-dev": true,
-    "work-os@kmello-dev": true,
     "skill-creator@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
     "pr-review-toolkit@claude-plugins-official": true,
     "mattpocock-skills@mattpocock": true,
-    "impeccable@impeccable": true,
-    "mycare-tools@mycare": false
+    "impeccable@impeccable": true
   },
   "extraKnownMarketplaces": {
     "mattpocock": {
@@ -69,12 +61,6 @@
       "source": {
         "source": "directory",
         "path": "/Users/kyle/personal/claude-plugins"
-      }
-    },
-    "kmello-dev": {
-      "source": {
-        "source": "directory",
-        "path": "/Users/kyle/work/claude-plugins"
       }
     }
   },
@@ -199,5 +185,6 @@
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
   "voiceEnabled": false,
-  "theme": "dark"
+  "theme": "dark",
+  "syncClaudeAiPlugins": false
 }

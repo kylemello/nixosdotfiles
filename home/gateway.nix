@@ -37,6 +37,10 @@
   kyle.claude = {
     enable = true;
     host = "gateway";
+    # One login and no work account. Kept on the work file, which is what the
+    # old shared settings.json became, so splitting the accounts changed
+    # nothing here.
+    settings = "settings.work.json";
   };
 
   # The always-on `claude remote-control` server. See home/claude-remote.nix.
