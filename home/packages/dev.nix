@@ -6,7 +6,6 @@
     air # Live reload for golang
     ansible
     awscli2
-    azure-cli
     bitbucket-cli
     bun
     cargo
@@ -63,6 +62,14 @@
   # fine — and because nixpkgs' chromium has no darwin platform at all, which
   # otherwise fails the ariane eval outright.
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (with pkgs; [
+    # nixpkgs marks python3Packages.fabric broken, so Hydra never builds
+    # azure-cli and every update compiles it from source along with ~15
+    # azure-mgmt-* packages: about 5 minutes, the slowest part of an ariane
+    # switch. ariane installs Homebrew's prebuilt bottle instead
+    # (`brew install azure-cli`, Microsoft's recommended macOS install);
+    # artemis keeps building it through overlays/fabric.nix. Move it back to
+    # the main list once fabric is unbroken and azure-cli is cached again.
+    azure-cli
     ungoogled-chromium
   ]);
 }
