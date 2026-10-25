@@ -146,16 +146,27 @@ let
   # Only what is declared above is managed; everything else in ~/.claude.json
   # (other projects, history, cached auth) is preserved by the deep-merge below.
   # Note the merge only ever ADDS: dropping a server from this set does not remove
-  # it from a host that already has it — do that with `claude mcp remove`. Likewise
+  # it from a host that already has it — do that with `claude mcp remove`, or list
+  # it in a `drop` below. Likewise
   # dropping homeTrust does not re-arm the prompt; clear the key by hand for that.
-  desired = builtins.toJSON ({ inherit mcpServers; } // homeTrust);
+  desired = servers: builtins.toJSON ({ mcpServers = servers; } // homeTrust);
 
   # The work account (kyle.claude.workAccount, home/claude.nix) reads its own
   # .claude.json, which needs the same servers. Tokens added by hand, like
   # home-assistant's header, have to be added there too, with the
   # `claude mcp add` run from inside ~/work.
-  claudeJsons = [ "$HOME/.claude.json" ]
-    ++ lib.optional config.kyle.claude.workAccount.enable "$HOME/.claude-work/.claude.json";
+  #
+  # With a work account, ~/.claude.json is the personal login's, so the work
+  # Jira goes only to ~/.claude-work and is deleted from the personal file
+  # (`drop`), where it was one more server asking to sign in.
+  workOnly = [ "atlassian-aegis" ];
+  claudeJsons =
+    if config.kyle.claude.workAccount.enable then [
+      { path = "$HOME/.claude.json"; servers = removeAttrs mcpServers workOnly; drop = workOnly; }
+      { path = "$HOME/.claude-work/.claude.json"; servers = mcpServers; drop = [ ]; }
+    ] else [
+      { path = "$HOME/.claude.json"; servers = mcpServers; drop = [ ]; }
+    ];
 in
 {
   # For the kyle.claudeCode.enable default below. Imported here as well as from
@@ -193,16 +204,17 @@ in
   # homeTrust adds under an existing projects[~] entry, which keeps its siblings.
   config.home.activation.claudeCodeJson =
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      desired='${desired}'
       jq=${pkgs.jq}/bin/jq
-      for claudeJson in ${lib.concatMapStringsSep " " (p: ''"${p}"'') claudeJsons}; do
+      mergeClaudeJson() {
+        local claudeJson=$1 desired=$2 drop=$3 tmp
         if [ ! -e "$claudeJson" ]; then
           $DRY_RUN_CMD mkdir -p "$(dirname "$claudeJson")"
           $DRY_RUN_CMD printf '%s\n' "$desired" > "$claudeJson"
           $DRY_RUN_CMD chmod 600 "$claudeJson"
         elif "$jq" -e . "$claudeJson" >/dev/null 2>&1; then
           tmp="$(mktemp "$claudeJson.XXXXXX")"
-          if "$jq" --argjson d "$desired" '. * $d' "$claudeJson" > "$tmp"; then
+          if "$jq" --argjson d "$desired" --argjson drop "$drop" \
+              '. * $d | .mcpServers |= del(.[$drop[]])' "$claudeJson" > "$tmp"; then
             $DRY_RUN_CMD mv "$tmp" "$claudeJson"
           else
             rm -f "$tmp"
@@ -211,6 +223,9 @@ in
         else
           echo "claude-code: $claudeJson is not valid JSON; skipping config merge" >&2
         fi
-      done
+      }
+      ${lib.concatMapStrings (t: ''
+        mergeClaudeJson "${t.path}" ${lib.escapeShellArg (desired t.servers)} ${lib.escapeShellArg (builtins.toJSON t.drop)}
+      '') claudeJsons}
     '';
 }
