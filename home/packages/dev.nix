@@ -65,7 +65,7 @@
     # nixpkgs marks python3Packages.fabric broken, so Hydra never builds
     # azure-cli and every update compiles it from source along with ~15
     # azure-mgmt-* packages: about 5 minutes, the slowest part of an ariane
-    # switch. ariane installs Homebrew's prebuilt bottle instead
+    # switch. ariane installs Homebrew's prebuilt cask instead
     # (`brew install azure-cli`, Microsoft's recommended macOS install);
     # artemis keeps building it through overlays/fabric.nix. Move it back to
     # the main list once fabric is unbroken and azure-cli is cached again.

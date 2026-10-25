@@ -83,7 +83,7 @@ Standalone profiles:
 | Profile | Role |
 |---------|------|
 | `kyle-work` | Office remote work machine. Stale — imports a since-removed `home/common.nix`, so it does not evaluate. (A second profile, `kmello@iodine` / `users/kyle/work-kmello.nix`, was removed; the `iodine` SSH host alias in `home/profiles/desktop.nix` stays.) |
-| `ariane` | macOS (`aarch64-darwin`) work laptop. **Home Manager only, no nix-darwin** (Homebrew keeps GUI casks; Nix owns the CLI toolchain, except `azure-cli`, which comes from a Homebrew bottle because nixpkgs never caches it; see the note in `home/packages/dev.nix`). Mirrors artemis's user env via `users/kyle/ariane.nix` + `home/darwin.nix` (git signing through the macOS 1Password `op-ssh-sign`; forces fish inside tmux). Built on Determinate Nix. Linux-only pkgs (e.g. `msodbcsql18`) are guarded with `lib.optionals stdenv.isLinux`. |
+| `ariane` | macOS (`aarch64-darwin`) work laptop. **Home Manager only, no nix-darwin** (Homebrew keeps GUI casks; Nix owns the CLI toolchain, except `azure-cli`, which comes from a Homebrew cask because nixpkgs never caches it; see the note in `home/packages/dev.nix`). Mirrors artemis's user env via `users/kyle/ariane.nix` + `home/darwin.nix` (git signing through the macOS 1Password `op-ssh-sign`; forces fish inside tmux). Built on Determinate Nix. Linux-only pkgs (e.g. `msodbcsql18`) are guarded with `lib.optionals stdenv.isLinux`. |
 
 ## Overlays and the auto-update system
 
