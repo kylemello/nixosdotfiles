@@ -1,16 +1,18 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Spend } from '../types'
 
 type Ledger = { seen: number; days: Record<string, number> }
 
-const spend = atom({ plugin: 'session-cost', key: 'spend' } as const, null)
-
 // The last total this process counted, so a /clear (new session id) isn't counted twice.
 let last: number | undefined
+// The terminal's status line script already shows the session's cost.
+let isTerminal = false
 
 const money = (usd: number) => `$${usd.toFixed(2)}`
+
+const label = (value: Spend) =>
+  `${money(value.session)} · today ${money(value.today)} · week ${money(value.week)}`
 
 const dayOf = (ms: number) => {
   const d = new Date(ms)
@@ -78,12 +80,14 @@ async function refresh($: EngineInterface, usd: number | undefined) {
   if (usd !== undefined && usd > 0) {
     await record($, usd)
   }
-  const value = usd === undefined ? null : await total($, usd)
-  await update($, spend, () => value)
+  if (!isTerminal) {
+    $.ui.status(label(await total($, usd ?? 0)))
+  }
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    isTerminal = e.surface === 'terminal'
     await refresh($, (await $.session.usage()).cost?.usd)
 
     return next(e)
@@ -95,15 +99,5 @@ export const register: Register = on => {
     }
 
     return next(e)
-  })
-
-  on('ui.render', { component: 'SessionMode', surface: 'desktop' }, async ($, e, next) => {
-    const value = await read($, spend)
-    if (value === null) {
-      return next(e)
-    }
-    const line = `${money(value.session)} · today ${money(value.today)} · week ${money(value.week)}`
-
-    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, line] } })
   })
 }
