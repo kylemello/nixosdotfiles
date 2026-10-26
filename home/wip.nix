@@ -468,7 +468,15 @@ in
       # enabled wip through the shared profile.
       systemd.user = lib.mkIf pkgs.stdenv.hostPlatform.isLinux {
         services.wip = {
-          Unit.Description = "Snapshot dirty working trees to the sync hub";
+          Unit = {
+            Description = "Snapshot dirty working trees to the sync hub";
+            # Leave a tick that is mid-run alone on `switch`. sd-switch otherwise
+            # restarts a changed, active unit and WAITS for it, and a oneshot is
+            # active until it exits — so one slow push held home-manager-kyle
+            # past its 5-minute timeout and failed the whole nixos-rebuild. The
+            # next tick picks up the new script anyway.
+            X-SwitchMethod = "keep-old";
+          };
           Service = {
             Type = "oneshot";
             ExecStart = "${tick}";

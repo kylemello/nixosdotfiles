@@ -476,7 +476,7 @@ wip_snapshot() {
   # other machine stops being told there is work waiting.
   if [ "$tree" = "$(git -C "$repo" rev-parse "$head^{tree}")" ]; then
     if [ -f "$marker" ]; then
-      git -C "$repo" push --quiet "$target" ":refs/heads/wip/$WIP_HOST" 2>/dev/null || true
+      git -C "$repo" push --no-verify --quiet "$target" ":refs/heads/wip/$WIP_HOST" 2>/dev/null || true
       rm -f "$marker"
     fi
     return 0
@@ -493,7 +493,14 @@ wip_snapshot() {
   fi
 
   wip_ensure_bare "$slug"
-  if ! git -C "$repo" push --force --quiet "$target" "$sha:refs/heads/wip/$WIP_HOST"; then
+  # --no-verify: a repo's pre-push hooks are for real pushes, not a 5-minute
+  # snapshot. git-lfs's in particular: the hub is a bare repo with no LFS
+  # server, so the hook falls back to https://<hub>/…/info/lfs and sits in a
+  # TCP timeout -- 11 hours on artemis on 2026-10-26, wedging the oneshot and,
+  # through Home Manager's restart of it, a nixos-rebuild. That upload could
+  # never succeed, so skipping it loses nothing: LFS-tracked dirty files
+  # travel as pointers only.
+  if ! git -C "$repo" push --no-verify --force --quiet "$target" "$sha:refs/heads/wip/$WIP_HOST"; then
     printf 'wip: %s: push to hub failed, will retry next run\n' "$repo" >&2
     return 1
   fi
