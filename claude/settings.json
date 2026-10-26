@@ -1,4 +1,5 @@
 {
+  "syncClaudeAiPlugins": false,
   "env": {
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "include.path",
@@ -18,7 +19,8 @@
       "Bash(podman stop *)",
       "Bash(podman volume *)",
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+      "mcp__claude_ai_Cloudflare__execute"
     ],
     "defaultMode": "auto"
   },
@@ -179,12 +181,11 @@
     "mode": "hold"
   },
   "skipWorkflowUsageWarning": true,
+  "theme": "dark",
   "editorMode": "vim",
   "remoteControlAtStartup": true,
   "inputNeededNotifEnabled": false,
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
-  "voiceEnabled": false,
-  "theme": "dark",
-  "syncClaudeAiPlugins": false
+  "voiceEnabled": false
 }
