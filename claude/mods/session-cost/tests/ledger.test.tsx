@@ -1,3 +1,4 @@
+import type { RenderSurface } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 const DIR = '/home/test/.claude/session-cost'
@@ -39,6 +40,7 @@ test('the status line shows this session, today and the week across sessions', a
   on('session.usage', () => ({
     value: { startedAt: 0, context: { window: 200000 }, rateLimits: [], cost: { usd: 1.5 } },
   }))
+  on('session.surfaces', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
 
@@ -86,6 +88,7 @@ test('a terminal session counts its spend but pins no line', async ($, on) => {
   on('session.usage', () => ({
     value: { startedAt: 0, context: { window: 200000 }, rateLimits: [], cost: { usd: 1.5 } },
   }))
+  on('session.surfaces', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   const status: (string | undefined)[] = []
@@ -95,7 +98,43 @@ test('a terminal session counts its spend but pins no line', async ($, on) => {
     return { value: undefined }
   })
 
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // The REPL can start before its terminal is bound as a surface.
+  await $.session.start({ cwd: '/', surface: null, isInteractive: true })
   expect(written).toEqual([`${DIR}/mine.json`])
-  expect(status).toEqual([])
+  expect(status).toEqual([undefined])
+})
+
+test('a terminal seen after start clears the pinned line', async ($, on) => {
+  mock.clock(on, { now: SUNDAY_NOON })
+  mock.env(on, { HOME: '/home/test' })
+
+  on('fs.exists', () => ({ value: false }))
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.list', () => ({ value: [] }))
+
+  on('session.id', () => ({ value: 'mine' }))
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { window: 200000 }, rateLimits: [], cost: { usd: 1.5 } },
+  }))
+  let surfaces: readonly RenderSurface[] = []
+  on('session.surfaces', () => ({ value: surfaces }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+
+  const status: (string | undefined)[] = []
+  on('ui.status', (_, e) => {
+    status.push(e.text)
+
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  surfaces = ['terminal']
+  await $.session.measure({
+    context: { window: 200000 },
+    rateLimits: [],
+    cost: { usd: 2 },
+    changed: ['cost'],
+  })
+  expect(status).toEqual(['$1.50 · today $0.00 · week $0.00', undefined])
 })

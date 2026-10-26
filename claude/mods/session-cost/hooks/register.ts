@@ -6,7 +6,8 @@ type Ledger = { seen: number; days: Record<string, number> }
 
 // The last total this process counted, so a /clear (new session id) isn't counted twice.
 let last: number | undefined
-// The terminal's status line script already shows the session's cost.
+// The terminal's status line script already shows the session's cost, so only the desktop
+// app pins it. Sticky: a REPL can start before its terminal is bound as a surface.
 let isTerminal = false
 
 const money = (usd: number) => `$${usd.toFixed(2)}`
@@ -80,14 +81,13 @@ async function refresh($: EngineInterface, usd: number | undefined) {
   if (usd !== undefined && usd > 0) {
     await record($, usd)
   }
-  if (!isTerminal) {
-    $.ui.status(label(await total($, usd ?? 0)))
-  }
+  isTerminal ||= (await $.session.surfaces()).includes('terminal')
+  $.ui.status(isTerminal ? undefined : label(await total($, usd ?? 0)))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    isTerminal = e.surface === 'terminal'
+    isTerminal = e.isInteractive || e.surface === 'terminal'
     await refresh($, (await $.session.usage()).cost?.usd)
 
     return next(e)
