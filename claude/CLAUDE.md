@@ -80,3 +80,70 @@ Say "I didn't verify X" rather than quietly omitting X. Vagueness is not brevity
   next step, a build with no completion signal — say so *before* it, naming
   what you're waiting on and for how long: "Waiting 30s for the MLX server to
   load weights." Same for a retry: say why the first wait wasn't enough.
+
+## Subagents: parallelize to save time
+
+I'll spend tokens to save wall-clock time. For implementation work this
+overrides the default "when in doubt, don't spawn": if a task splits into
+independent pieces, run them in parallel. (Written for the main thread. A
+subagent does only its own piece, and the only agent it spawns is its reviewer.)
+
+### When
+- **Fan out** when the work splits into 2+ pieces that touch disjoint files and
+  don't need each other's output: the same change across several modules, a
+  feature and its tests, an API and its caller once the contract is fixed.
+- **Fan out reading too.** Several unknowns up front → one Explore agent each,
+  all in one message.
+- **Don't** for a handful of edits, a strict chain where each step needs the
+  last one's result, or debugging where understanding the cause is the bottleneck.
+- Up to ~20 agents in flight. Size pieces so each is worth an agent; never
+  split one file's change across several.
+
+### Models and effort
+- Every agent runs on Opus: pass `model: "opus"` so no agent definition
+  downgrades it.
+- I authorize you to set `effort` on every agent; pick it per piece. `low` for
+  mechanical or fully specified work and Explore searches, `medium` for a normal
+  piece with a clear contract, `high` for real logic or tricky edge cases.
+  Implementers never get `xhigh`/`max`; that's the reviewer's job.
+- Implement with fresh `general-purpose` agents. Forks ignore `effort` and run
+  at yours, so fork only when a piece needs context too rich to brief.
+
+### How
+1. **Plan first, in the main thread,** and write it to a file in the
+   scratchpad: the contract (signatures, names, data shapes), conventions to
+   match, a table of pieces with the files each one owns, and the reviewer
+   brief (see Review). Every agent gets that file's absolute path, so briefs
+   stay short and all agents build against the same contract.
+2. **State the split in one line before launching**: "Splitting into 6: four
+   modules to agents (low), the parser to an agent (high), the glue myself."
+3. **One owner per file.** Each agent edits only the files the plan assigns
+   it. Use `isolation: "worktree"` only when pieces truly must share files.
+4. **Every brief includes**: the plan path, which piece it owns, the narrowest
+   check to run (one test file, one typecheck target; none if checks can't run
+   concurrently), the review step below, and the report format: files changed,
+   check result, review findings, anything skipped or changed from the plan.
+   A few lines, no recap.
+5. **Subagents don't commit, push, run the full suite, or spawn any agent but
+   their reviewer.** The main thread owns git and final verification. Say so
+   in the brief: a subagent that reads a repo's "commit every change" rule
+   will commit half a feature.
+6. **Launch all independent agents in one message, then keep working** on the
+   critical-path piece yourself (usually what the others plug into, or the
+   glue). Don't sit idle waiting.
+
+### Review
+Low-effort work gets a high-effort check before it counts as done.
+- **Each implementer reviews its own piece before reporting.** It spawns one
+  reviewer (`model: "opus"`, `effort: "xhigh"`) with the reviewer brief from
+  the plan, passing only the plan path, its piece, and its files: never its
+  own account of what it did.
+- **Reviewers report and nothing else**: bugs, contract violations and missed
+  edge cases with `file:line` and a concrete failure case. No style nits, no
+  edits, no agents of their own.
+- **The implementer fixes every finding or escalates it**, never drops one.
+  Its report includes the findings verbatim, each marked fixed or disputed.
+  Re-review only if a fix was substantial.
+- **The main thread** settles disputed findings, then runs one xhigh review
+  of the whole diff focused on the seams between pieces, then the full
+  typecheck / lint / test / build.
