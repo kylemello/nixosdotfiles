@@ -9,18 +9,26 @@ let
   # Symbolic hotkey 263 is Keyboard Shortcuts > Screenshots > "Ask Siri about
   # active window" (⇧⌘Space: keycode 49, modifiers 0x120000). The value is
   # written back out with the default binding so Settings still shows it, just
-  # unchecked.
+  # unchecked. The live WindowServer state is read and set through SkyLight's
+  # CGS*SymbolicHotKey* calls from JXA, so no python or compiled helper.
   hotkeysPlist =
     "${config.home.homeDirectory}/Library/Preferences/com.apple.symbolichotkeys.plist";
   noSiriWindowShortcut = pkgs.writeShellScript "no-siri-window-shortcut" ''
     set -euo pipefail
-    enabled=$(/usr/bin/defaults export com.apple.symbolichotkeys - \
+    live=$(/usr/bin/osascript -l JavaScript -e '
+      ObjC.import("CoreGraphics");
+      ObjC.bindFunction("CGSIsSymbolicHotKeyEnabled", ["bool", ["int"]]);
+      $.CGSIsSymbolicHotKeyEnabled(263)')
+    saved=$(/usr/bin/defaults export com.apple.symbolichotkeys - \
       | /usr/bin/plutil -extract AppleSymbolicHotKeys.263.enabled raw -o - - 2>/dev/null || true)
-    [ "$enabled" = false ] && exit 0
+    [ "$live" = false ] && [ "$saved" = false ] && exit 0
     /usr/bin/defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 263 \
       '<dict><key>enabled</key><false/><key>value</key><dict><key>parameters</key><array><integer>32</integer><integer>49</integer><integer>1179648</integer></array><key>type</key><string>standard</string></dict></dict>'
-    /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
-    echo "$(date '+%F %T') re-disabled hotkey 263 (was: ''${enabled:-unset})"
+    /usr/bin/osascript -l JavaScript -e '
+      ObjC.import("CoreGraphics");
+      ObjC.bindFunction("CGSSetSymbolicHotKeyEnabled", ["int", ["int", "bool"]]);
+      $.CGSSetSymbolicHotKeyEnabled(263, false)' >/dev/null
+    echo "$(date '+%F %T') re-disabled hotkey 263 (live: $live, saved: ''${saved:-unset})"
   '';
 in
 {
@@ -149,15 +157,18 @@ in
   home.file.".local/share/dotnet".source = dotnetRoot;
 
   # macOS 27's Siri AI keeps turning "Ask Siri about active window" back on
-  # after it is unchecked in Settings, stealing ⇧⌘Space. Re-disable it whenever
-  # the hotkeys plist changes (and once at login). The script is a no-op when
-  # the entry is already off, so its own write retriggering the watch is
-  # harmless; launchd's default 10s throttle bounds any tug-of-war.
+  # after it is unchecked in Settings, stealing ⇧⌘Space. Sometimes it rewrites
+  # the plist, and sometimes it re-enables the hotkey live in WindowServer with
+  # the plist still saying off (2026-10-27), which no file watch can see. So
+  # re-disable it whenever the plist changes, at login, and every 30s. The
+  # script is a no-op when both are already off, so its own write retriggering
+  # the watch is harmless; launchd's default 10s throttle bounds any tug-of-war.
   launchd.agents.no-siri-window-shortcut = {
     enable = true;
     config = {
       ProgramArguments = [ "${noSiriWindowShortcut}" ];
       WatchPaths = [ hotkeysPlist ];
+      StartInterval = 30;
       RunAtLoad = true;
       ProcessType = "Background";
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/no-siri-window-shortcut.log";
