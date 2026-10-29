@@ -16,6 +16,8 @@ let
   };
 in
 {
+  imports = [ ./tpane.nix ];
+
   programs.tmux = {
     enable = true;
     # Corresponds to your general settings
