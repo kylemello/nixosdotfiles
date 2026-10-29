@@ -131,8 +131,9 @@ let
   # Once declared here, now deleted from every .claude.json. notion-personal was
   # Notion's hosted server for the personal workspace, next to the claude.ai
   # Notion connector serving the work one; with a login per account, each
-  # account's claude.ai connector serves its own workspace.
-  retired = [ "notion-personal" ];
+  # account's claude.ai connector serves its own workspace. teams-mcp is
+  # superseded by the claude.ai Microsoft 365 connector's Teams tools.
+  retired = [ "notion-personal" "teams-mcp" ];
 
   claudeJsons =
     if config.kyle.claude.workAccount.enable then [
