@@ -34,7 +34,7 @@
     kubernetes-helm
     lazydocker
     lazygit
-    nodejs_24
+    nodejs_26
     openssl
     opentofu
     php
