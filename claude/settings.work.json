@@ -18,7 +18,18 @@
       "Bash(podman stop *)",
       "Bash(podman volume *)",
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+      "mcp__claude_ai_Microsoft_365__teams_create_chat",
+      "mcp__claude_ai_Microsoft_365__teams_send_chat_message",
+      "mcp__claude_ai_Microsoft_365__teams_send_channel_message",
+      "mcp__claude_ai_Microsoft_365__teams_reply_channel_message",
+      "mcp__claude_ai_Microsoft_365__outlook_send_mail",
+      "mcp__claude_ai_Microsoft_365__outlook_forward_mail",
+      "mcp__claude_ai_Microsoft_365__outlook_create_draft",
+      "mcp__claude_ai_Microsoft_365__outlook_create_reply_draft",
+      "mcp__claude_ai_Microsoft_365__outlook_create_reply_all_draft",
+      "mcp__claude_ai_Microsoft_365__outlook_update_draft",
+      "mcp__claude_ai_Microsoft_365__outlook_send_draft"
     ],
     "defaultMode": "auto",
     "additionalDirectories": [
