@@ -161,7 +161,7 @@
   # the aliases and functions are ported here. Transcribed from
   # /usr/share/omarchy/default/bash/aliases as of 2026-08-26.
   #
-  # Four deliberate omissions:
+  # Five deliberate omissions:
   #   cd    — home/fish.nix already aliases it to `z`. Omarchy's `zd` wrapper adds
   #           a "print the directory it jumped to" flourish on top of the same
   #           zoxide; not worth diverging from the other two machines for.
@@ -170,6 +170,7 @@
   #   eff   — depends on ff.
   #   mup   — `mise up`, and this machine has just handed mise's overlapping
   #           tools to Nix. `nix flake update` is the equivalent now.
+  #   c     — `opencode --auto`, and OpenCode is not used.
   programs.fish.shellAliases = {
     # File system. `ls` is deliberately shadowed, matching Omarchy's own default;
     # home/fish.nix's l/ll/llr stay alongside it.
@@ -185,7 +186,6 @@
 
     # Tools
     a = "omarchy-agent --inline";
-    c = "opencode --auto";
     cy = "codex --approve-for-me";
     d = "docker";
     r = "rails";
@@ -283,9 +283,6 @@
   #                    and theme.lua. The theme hot-reload one is what keeps nvim
   #                    in step with `omarchy-theme-set`; the symlink would take
   #                    all four away.
-  #   kyle.opencode  — ~/.config/opencode/opencode.json already exists here, and
-  #                    that module points opencode at the ollama server that only
-  #                    artemis runs.
 
   # Shared shell history with artemis and ariane, behind fzf.fish's Ctrl-R. Unlike
   # kyle.wip this needs no SSH key at all — atuin syncs over plain HTTP to

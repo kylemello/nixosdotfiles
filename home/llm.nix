@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }:
 
 # Local LLM stack for ariane -- Metal-enabled MLX from PyPI, served by
-# vllm-mlx, driven by OpenCode.
+# vllm-mlx.
 #
 # WHY NOT NIXPKGS: nixpkgs builds python3Packages.mlx with
 # -DMLX_BUILD_METAL:BOOL=FALSE, because Nix's build sandbox cannot reach
@@ -167,9 +167,8 @@ let
       export HF_HUB_OFFLINE=1
 
       # DETACHED BY DEFAULT. The point of this command is to hand back a usable
-      # prompt so the next thing you type can be `opencode`. An exec'd server
-      # that owns the terminal makes that awkward for no benefit.
-      # `llm <slot> --foreground` keeps it attached for debugging.
+      # prompt. An exec'd server that owns the terminal makes that awkward for
+      # no benefit. `llm <slot> --foreground` keeps it attached for debugging.
       set -- "$VENV/bin/vllm-mlx" serve "$repo" \
         --host 127.0.0.1 --port "$PORT" \
         --api-key "$(cat "$KEYFILE")" \
@@ -189,7 +188,6 @@ let
       if wait_ready; then
         echo "ready: $repo" >&2
         echo "  endpoint  http://127.0.0.1:$PORT" >&2
-        echo "  opencode  opencode run --model mlx/$repo \"...\"" >&2
         echo "  logs      llm logs        stop: llm stop" >&2
         return 0
       fi
@@ -239,15 +237,15 @@ PY
 
       coder) serve_model ${lib.escapeShellArg coderRepo} ${lib.escapeShellArg coderParser} "" ;;
       # --reasoning-parser qwen3 here too: Qwen3.6-35B-A3B also has a thinking
-      # mode, which I initially missed. Without it, an OpenCode reply came back
-      # as the answer, then a stray </think>, then the answer again. Caught by
-      # using it, not by the test suite -- the suite checks tool calls, not
-      # whether prose is clean.
+      # mode, which I initially missed. Without it, a reply came back as the
+      # answer, then a stray </think>, then the answer again. Caught by using
+      # it, not by the test suite -- the suite checks tool calls, not whether
+      # prose is clean.
       agent) serve_model ${lib.escapeShellArg agentRepo} ${lib.escapeShellArg agentParser} ${lib.escapeShellArg ((if agentMllm then "--mllm " else "") + "--reasoning-parser qwen3")} ;;
       # --reasoning-parser qwen3: Qwen3.8 has a thinking mode, and without this
-      # its <think> monologue leaks into message.content -- observed in an
-      # OpenCode session, where the reply arrived wrapped in stray </think>
-      # tags. With it, reasoning is split into message.reasoning_content and
+      # its <think> monologue leaks into message.content -- observed in a real
+      # session, where the reply arrived wrapped in stray </think> tags. With
+      # it, reasoning is split into message.reasoning_content and
       # content holds just the answer. The other two models have no thinking
       # mode and must not get it.
       hard)  serve_model ${lib.escapeShellArg hardRepo}  ${lib.escapeShellArg hardParser}  "--reasoning-parser qwen3" ;;
@@ -323,8 +321,8 @@ usage: llm <command>
     hard     Qwen3.8-27B          best quality, thinking mode   ~15 tok/s
     long     <file.gguf>          llama.cpp, for >60K prompts
 
-  Serving commands DETACH and return once the model answers, so the next
-  thing you type can be opencode. Add --foreground/-F to keep one attached.
+  Serving commands DETACH and return once the model answers. Add
+  --foreground/-F to keep one attached.
 
   lifecycle
     status   what is loaded, plus prefix-cache hit stats
@@ -350,54 +348,4 @@ in
     pkgs.llama-cpp
     llm
   ];
-
-  # OpenCode -> local vllm-mlx. The API key file (~/.config/mlx/api-key, mode
-  # 0600) is never read by Nix and never touches the store: `{file:...}` is an
-  # OpenCode-side placeholder resolved at runtime, so only this literal string
-  # -- not the key -- lands in the store-backed config. That matters because
-  # store paths are world-readable and this repo is public.
-  #
-  # `provider` deliberately contains exactly ONE entry. Every PHI guarantee in
-  # the design reduces to that fact plus the loopback baseURL: with no cloud
-  # provider configured, there is nothing for OpenCode to fall back to.
-  #
-  # Model ids contain slashes, which is fine: OpenCode's --model parser splits
-  # on the FIRST slash only and passes the remainder through verbatim, so
-  # `mlx/mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` resolves correctly.
-  xdg.configFile."opencode/opencode.json" = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin {
-    text = builtins.toJSON {
-      "$schema" = "https://opencode.ai/config.json";
-
-      # Session transcripts must never leave this machine. This is the real
-      # egress risk in OpenCode -- there is no separate telemetry SDK.
-      share = "disabled";
-      # Belt and braces: the nixpkgs opencode wrapper already hardcodes
-      # OPENCODE_DISABLE_AUTOUPDATE=true, but a future wrapper change should
-      # not silently re-enable it.
-      autoupdate = false;
-
-      provider.mlx = {
-        npm = "@ai-sdk/openai-compatible";
-        name = "MLX (local, vllm-mlx)";
-        options = {
-          baseURL = "http://127.0.0.1:${port}/v1";
-          apiKey = "{file:~/.config/mlx/api-key}";
-        };
-        models = {
-          # Names carry measured per-turn cost, because that is the thing you
-          # actually need at the moment you pick a model. Figures are for an
-          # OpenCode-shaped request (~4.9K-token system prompt + 11 tools).
-          "${coderRepo}" = { name = "Qwen3-Coder 30B — ~7s/turn, fast coding"; tools = true; };
-          "${agentRepo}" = { name = "Qwen3.6 35B-A3B — ~6s cold / <1s warm, BEST for agent loops"; tools = true; };
-          # ~40s per turn on the same request -- it is dense, so prefill of
-          # OpenCode's system prompt alone dominates. Combined with thinking
-          # mode (reasoning goes to reasoning_content, so nothing renders while
-          # it thinks) an agent loop looks hung and OpenCode eventually cancels:
-          #   [stream_outputs] CancelledError after 0 tokens, 54.7s
-          # Kept available for deliberate one-shot use; the name is the warning.
-          "${hardRepo}" = { name = "Qwen3.8 27B — SLOW ~40s/turn, one-shot only"; tools = true; reasoning = true; };
-        };
-      };
-    };
-  };
 }

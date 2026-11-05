@@ -291,7 +291,6 @@
   # files are named with the quant as a prefix (Q4_K_M-KAT-Coder-....gguf)
   # rather than the suffix ollama's resolver expects. Download the .gguf from
   # HuggingFace and `ollama create kat-coder -f Modelfile` against it instead.
-  # `kat-coder` is the short tag home/opencode.nix points opencode at.
   services.ollama = {
     enable = true;
     package = pkgs.ollama-cuda;
@@ -318,7 +317,7 @@
       # costs ~96 KB/token of KV cache at f16, so 64k tokens would be 6.3 GB.
       # q8_0 halves that to ~3.1 GB and puts the total near 24 GB with room
       # for the compute buffers. Quantized KV needs flash attention, hence the
-      # third variable. Keep kyle.opencode.contextLimit in step with this.
+      # third variable.
       OLLAMA_CONTEXT_LENGTH = "65536";
       OLLAMA_KV_CACHE_TYPE = "q8_0";
       OLLAMA_FLASH_ATTENTION = "1";

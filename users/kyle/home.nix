@@ -27,7 +27,6 @@
     ../../home/codex.nix
     ../../home/nvim.nix
     ../../home/sync.nix
-    ../../home/opencode.nix
     ../../home/docker-composes.nix
 
     ../../home/packages/base.nix

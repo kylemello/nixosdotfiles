@@ -133,29 +133,6 @@ else
 fi
 
 echo
-echo "== Task 5: opencode config =="
-CFG="$HOME/.config/opencode/opencode.json"
-if [ -f "$CFG" ]; then
-  ok "opencode config exists"
-  check "share is disabled"   "$(jq -r '.share' "$CFG")" "disabled"
-  check "autoupdate is off"   "$(jq -r '.autoupdate' "$CFG")" "false"
-  check "baseURL is loopback" "$(jq -r '.provider.mlx.options.baseURL' "$CFG")" "http://127.0.0.1:8000/v1"
-  # Zero cloud providers. The whole PHI case rests on this one assertion.
-  check "only the local provider is configured" "$(jq -r '.provider | keys | join(",")' "$CFG")" "mlx"
-  check "all three models declared" "$(jq -r '.provider.mlx.models | keys | length' "$CFG")" "3"
-  [ -L "$CFG" ] && ok "config is a nix store symlink" \
-                || bad "config is a nix store symlink" "it is a plain file"
-  # The key itself must never reach the world-readable nix store.
-  if grep -qE '\b[0-9a-f]{64}\b' "$CFG" 2>/dev/null; then
-    bad "no API key literal in config" "a 64-hex string is present"
-  else
-    ok "no API key literal in config"
-  fi
-else
-  bad "opencode config exists" "$CFG missing"
-fi
-
-echo
 echo "== Task 6: llama.cpp escape hatch =="
 have llama-server
 # Metal must survive in the nixpkgs build, or the hatch is worthless. Unlike

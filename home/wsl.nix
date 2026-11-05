@@ -252,12 +252,6 @@ in
     host = "artemis";
   };
 
-  # ~/.config/opencode/opencode.json pointing opencode at the ollama server in
-  # hosts/wsl.nix. Enabled HERE for the same reason as everything above, plus a
-  # specific one: artemis is the only machine with the GPU and the server, so
-  # the provider would be dead config anywhere else.
-  kyle.opencode.enable = true;
-
   # ~/docker-composes, the hand-run dev stacks (postgres, mysql, dolt, redis,
   # open-webui). Enabled HERE because artemis is the only host with Docker
   # Desktop's WSL integration — and the open-webui stack points at the ollama

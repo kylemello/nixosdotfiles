@@ -1,7 +1,7 @@
 # Local LLM on ariane
 
-Metal-enabled MLX from PyPI, served by `vllm-mlx`, driven by OpenCode. Design
-rationale, the failed nixpkgs attempt, and rejected alternatives are in
+Metal-enabled MLX from PyPI, served by `vllm-mlx`. Design rationale, the failed
+nixpkgs attempt, and rejected alternatives are in
 `docs/superpowers/specs/2026-08-24-local-llm-mlx-design.md`.
 
 Everything below was measured on ariane (M4 Pro, 48 GB) on 2026-08-24. Where a
@@ -139,7 +139,7 @@ Written from the numbers above, not from vendor claims.
 - **`llm coder`** — bulk work, completions, anything throughput-bound. Fastest
   by a wide margin at 88 tok/s.
 - **`llm agent`** — multi-step tool use. 59 tok/s and a first-class `qwen`
-  parser; the natural default for OpenCode sessions.
+  parser; the natural default for agent sessions.
 - **`llm hard`** — problems worth waiting on. 15 tok/s is roughly 6x slower
   than the coder, so reach for it deliberately, not by default.
 - **`llm long`** — **rarely, if ever.** The original design assumed MLX would
@@ -149,12 +149,13 @@ Written from the numbers above, not from vendor claims.
   GGUF) and llama.cpp has open `qwen3_5` correctness bugs. Treat it as a
   contingency, not a workflow.
 
-## Measured: cost per turn under OpenCode
+## Measured: cost per turn in an agent loop
 
 The numbers above are raw generation speed. What actually matters for an agent
-loop is the round trip *including* OpenCode's own overhead — it sends a ~4.9K
-token system prompt plus 11 tool definitions on every turn, and re-sends the
-growing transcript each time.
+loop is the round trip *including* the harness's own overhead. These figures
+were taken under OpenCode (since removed from this repo), which sends a ~4.9K
+token system prompt plus 11 tool definitions on every turn and re-sends the
+growing transcript each time. A different harness will shift them.
 
 Identical request ("say the single word: ready") through all three:
 
@@ -164,11 +165,10 @@ Identical request ("say the single word: ready") through all three:
 | `coder` Qwen3-Coder-30B-A3B | 7.5s | 6.7s |
 | `hard` Qwen3.8-27B | **40.0s** | — |
 
-**`llm hard` is not usable for OpenCode agent loops.** It is dense, so prefill
-of the system prompt alone dominates at ~127 tok/s against the MoE models'
-~340. Worse, its thinking mode routes output to `reasoning_content`, so nothing
-renders while it works — the session looks frozen, and OpenCode eventually
-gives up:
+**`llm hard` is not usable for agent loops.** It is dense, so prefill of the
+system prompt alone dominates at ~127 tok/s against the MoE models' ~340. Worse,
+its thinking mode routes output to `reasoning_content`, so nothing renders while
+it works — the session looks frozen, and the harness eventually gives up:
 
 ```
 [stream_outputs] CancelledError after 0 tokens, 54.7s
@@ -176,11 +176,10 @@ gives up:
 
 That is not a bug; it is a dense 27B doing exactly what the bandwidth
 arithmetic predicts. Use `hard` for a deliberate one-shot question where you
-will wait, and drive OpenCode with `agent` or `coder`.
+will wait, and run agent loops on `agent` or `coder`.
 
-**`agent` is the right default for OpenCode** — 0.83s warm is the only figure
-here that feels interactive, and it is the model with the best tool-use scores
-anyway.
+**`agent` is the right default** — 0.83s warm is the only figure here that feels
+interactive, and it is the model with the best tool-use scores anyway.
 
 ## `HF_HUB_OFFLINE=1`, not `--offline`
 
@@ -212,15 +211,14 @@ huggingface_hub's canonical switch, is honoured correctly, and is what
   runs. The 0600 file mode does not confine it once the server starts. This is
   an upstream limitation, not a configuration choice. `llama-server` avoids it
   (`--api-key-file`) and `llm long` uses that form.
-- Key at `~/.config/mlx/api-key`, mode 0600, never committed. The Nix store
-  holds only the literal placeholder `{file:~/.config/mlx/api-key}`, which
-  OpenCode resolves at runtime — store paths are world-readable and this repo
-  is public.
+- Key at `~/.config/mlx/api-key`, mode 0600, never committed and never read by
+  Nix, so it stays out of the store — store paths are world-readable and this
+  repo is public.
 - `HF_HUB_OFFLINE=1` during serving: no weight fetches during inference.
-- OpenCode config declares **exactly one provider**. With no cloud provider
-  configured there is nothing to fall back to. `share: "disabled"` stops
-  transcript upload, which is the real egress path (there is no separate
-  telemetry SDK in OpenCode).
+
+**All of this covers the server only.** Whatever client you point at it brings
+its own egress paths, so audit that separately before handling anything
+sensitive.
 
 **Other network activity, for completeness.** `llm sync` and `llm lock` reach
 PyPI (97 wheels, ~1.3 GB). Model downloads reach HuggingFace. Both are setup
@@ -233,16 +231,9 @@ here: it activates only via `--mcp-config`, `VLLM_MLX_MCP_CONFIG`, or
 would open an outbound path from inside the "no network during inference"
 boundary, so do not create one casually.
 
-**Data at rest is not covered by any of the above.** OpenCode persists session
-transcripts locally in plaintext, and the HF cache holds the weights. Egress
-controls do not encrypt anything on disk.
-
-**One caveat, stated plainly:** OpenCode's provider is declared as
-`npm = "@ai-sdk/openai-compatible"`, and on *first* use it fetches that package
-from npm. That is a one-time setup cost, not per-inference traffic, but it is
-network activity — do the first run before you start handling anything
-sensitive. It is also why the first `opencode run` appears to hang for minutes;
-subsequent runs complete in seconds.
+**Data at rest is not covered by any of the above.** The HF cache holds the
+weights, and any session history a client keeps is its own. Egress controls do
+not encrypt anything on disk.
 
 ## Usage
 
@@ -258,29 +249,19 @@ llm doctor    # venv health, GPU check
 ```
 
 **The serving commands detach and return.** `llm hard` hands the prompt back in
-~8s once the model answers, so the next thing you type can be `opencode` in the
-same shell. Add `--foreground` / `-F` to keep one attached for debugging.
-Re-running the same slot is a no-op (~0.04s) rather than a 15 GiB reload;
-switching slots evicts the old model and waits for the memory back before
-loading the new one.
+~8s once the model answers. Add `--foreground` / `-F` to keep one attached for
+debugging. Re-running the same slot is a no-op (~0.04s) rather than a 15 GiB
+reload; switching slots evicts the old model and waits for the memory back
+before loading the new one.
 
 Qwen3.8 is served with `--reasoning-parser qwen3`. Without it, its thinking
 mode leaks `<think>` monologue into `message.content` — observed in a real
-OpenCode session, where a reply came back wrapped in stray `</think>` tags.
-With it, reasoning lands in `message.reasoning_content` and `content` holds
-only the answer. The other two models have no thinking mode and do not get it.
+session, where a reply came back wrapped in stray `</think>` tags. With it,
+reasoning lands in `message.reasoning_content` and `content` holds only the
+answer. The other two models have no thinking mode and do not get it.
 
-Then point OpenCode at it:
-
-```
-opencode run --model mlx/mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit "..."
-```
-
-Model ids contain slashes; that is fine. OpenCode splits on the **first** slash
-only and passes the rest through verbatim.
-
-Verified end-to-end: OpenCode read a file, diagnosed a seeded bug, edited it,
-and exited cleanly in ~4 s.
+Clients reach the server at `http://127.0.0.1:8000/v1` (OpenAI-compatible), with
+the contents of `~/.config/mlx/api-key` as the bearer token.
 
 ## GPU memory limit
 
