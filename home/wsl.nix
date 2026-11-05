@@ -19,6 +19,21 @@ let
       fi
     done
   '';
+
+  # `op` is the Windows 1Password CLI, signed in through the desktop app. The
+  # Linux build can't complete an SSO account's sign-in from WSL. One thing it
+  # can't do: `op run` starts its command on the Windows side, so a Linux
+  # program fails with "executable file not found in %PATH%". Use `op read` or
+  # `op inject` instead.
+  windowsOp = pkgs.writeShellScriptBin "op" ''
+    # A Windows process sees only the variables WSLENV names, so OP_ACCOUNT,
+    # OP_FORMAT and the rest would otherwise be silently dropped.
+    for name in ''${!OP_@}; do
+      WSLENV="''${WSLENV:+$WSLENV:}$name"
+    done
+    export WSLENV
+    exec /mnt/c/Users/kylem/AppData/Local/Microsoft/WinGet/Links/op.exe "$@"
+  '';
 in
 {
   # Alias common SSH commands to their Windows executable counterparts.
@@ -55,7 +70,8 @@ in
   # xdg.mimeApps, because ~/.config/mimeapps.list belongs to Claude Code: it
   # registers its claude-cli:// handler there with `xdg-mime default`, which
   # would replace a Home Manager symlink and fail the next switch.
-  home.packages = [ windowsBrowser ];
+  # hiPrio so the wrapper wins bin/op over home/packages/dev.nix's _1password-cli.
+  home.packages = [ windowsBrowser (lib.hiPrio windowsOp) ];
   home.sessionVariables.BROWSER = "windows-browser";
 
   xdg.desktopEntries.windows-browser = {
