@@ -151,6 +151,15 @@ in
         exec ${pkgs.claude-code}/bin/claude "$@"
       '';
 
+      # For callers that pick the account themselves, like a T3 Code provider
+      # instance's binary path. Through the wrapper above, its ~/.claude-work
+      # would be decided again by folder, and be personal outside work.dirs.
+      workLauncher = pkgs.writeShellScriptBin "claude-work" ''
+        export CLAUDE_CONFIG_DIR=${lib.escapeShellArg "${homeDir}/.claude-work"}
+        export CLAUDE_CODE_PLUGIN_CACHE_DIR=${lib.escapeShellArg "${homeDir}/.claude/plugins"}
+        exec ${pkgs.claude-code}/bin/claude "$@"
+      '';
+
       # The same links in each config dir, so both accounts see one CLAUDE.md
       # and skill set. settings.json is per account: the personal org syncs
       # every Anthropic knowledge-work plugin from claude.ai (37 MCP servers
@@ -221,7 +230,7 @@ in
       home.file = shared ".claude" cfg.settings
         // lib.optionalAttrs work.enable (shared ".claude-work" "settings.work.json");
 
-      home.packages = lib.mkIf work.enable [ (lib.hiPrio wrapper) ];
+      home.packages = lib.mkIf work.enable [ (lib.hiPrio wrapper) workLauncher ];
       kyle.claude.package = lib.mkIf work.enable wrapper;
     }
   );
