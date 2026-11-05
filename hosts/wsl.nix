@@ -329,13 +329,12 @@
     };
   };
 
-  # ---- Open WebUI ---------------------------------------------------------
-  # Not here. It is a compose stack, ~/docker-composes/open-webui, managed as a
-  # file by home/docker-composes.nix and started by hand like the dev databases
-  # next to it.
+  # ---- Containers ---------------------------------------------------------
+  # Not here. They are compose stacks in ~/docker-composes, managed as files by
+  # home/docker-composes.nix and started by hand.
   #
-  # It was a virtualisation.oci-containers container until 2026-08-20 and that
-  # could not work on this host, for two reasons worth keeping:
+  # virtualisation.oci-containers was tried until 2026-08-20 and could not work
+  # on this host, for two reasons worth keeping:
   #
   #   * The module's default log driver is journald, and this dockerd rejects it
   #     ("journald is not enabled on this host" at container create). nixpkgs'
@@ -349,18 +348,12 @@
   #     artemis's dockerd keeps listening on the now-unlinked inode, running and
   #     unreachable by path. So the unit's container was created in the
   #     docker-desktop distro — /etc/hostname `docker-desktop`, `--network=host`
-  #     joining that distro's namespace — where it could reach neither ollama on
-  #     artemis's loopback (curl to 127.0.0.1:11434 from inside: no answer) nor
-  #     a browser on :3000, from Windows or from here.
+  #     joining that distro's namespace — where it could reach neither services
+  #     on artemis's loopback nor a browser, from Windows or from here.
   #
-  # The compose stack sidesteps both: Docker Desktop's engine is the one being
-  # asked, ports are published rather than shared, and ollama is reached at
-  # host.docker.internal:11434 — which means OLLAMA_HOST above stays on
-  # loopback and 11434 stays off the LAN and off Tailscale.
-  #
-  # The old container's SQLite lives in /var/lib/open-webui (root-owned, written
-  # through Docker Desktop's file sharing). It was copied into the stack's
-  # named volume on 2026-08-20; the directory is left in place, unmanaged.
+  # Compose sidesteps both: Docker Desktop's engine is the one being asked, ports
+  # are published rather than shared, and a container reaches a service on
+  # artemis's loopback at host.docker.internal rather than 127.0.0.1.
 
   # ---- SSH into the WSL instance ------------------------------------------
   # WSL runs with `networkingMode=mirrored` (set Windows-side in

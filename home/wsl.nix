@@ -252,10 +252,9 @@ in
     host = "artemis";
   };
 
-  # ~/docker-composes, the hand-run dev stacks (postgres, mysql, dolt, redis,
-  # open-webui). Enabled HERE because artemis is the only host with Docker
-  # Desktop's WSL integration — and the open-webui stack points at the ollama
-  # server hosts/wsl.nix runs on this machine.
+  # ~/docker-composes, the hand-run dev stacks (postgres, mysql, dolt, redis).
+  # Enabled HERE because artemis is the only host with Docker Desktop's WSL
+  # integration.
   kyle.dockerComposes.enable = true;
 
   # C:\Users\kylem\.psmux.conf, the Windows-side tmux, kept in step with

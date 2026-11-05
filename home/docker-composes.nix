@@ -28,9 +28,8 @@ in
 
     Off by default and enabled per-host in home/wsl.nix, NOT in
     users/kyle/home.nix — artemis is the machine with Docker Desktop's WSL
-    integration and the ollama server the open-webui stack talks to. The other
-    three NixOS hosts would get compose files for engines and services they do
-    not run
+    integration. The other three NixOS hosts would get compose files for engines
+    they do not run
   '';
 
   config = lib.mkIf cfg.enable {
